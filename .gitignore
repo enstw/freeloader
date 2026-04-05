@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv
+.uv/
+
+# jRouter runtime data (conversation logs, scratch dirs)
+data/
+scratch/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
