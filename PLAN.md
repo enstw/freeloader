@@ -1,16 +1,16 @@
-# jRouter Project Plan
+# FreelOAder Project Plan
 
 ## Concept
 
-jRouter is a unified AI gateway that routes requests across **existing CLI
+FreelOAder is a unified AI gateway that routes requests across **existing CLI
 subscriptions** (Claude Pro, ChatGPT Plus, Gemini Pro, …) to achieve a **fixed,
 predictable monthly cost ceiling** equal to the sum of those subscription fees.
 Unlike OpenRouter's pay-per-token model, it treats each subscription's quota as
 a consumable resource pool and only switches providers when quota runs low.
 
-### OpenRouter vs jRouter
+### OpenRouter vs FreelOAder
 
-| Aspect | OpenRouter | jRouter |
+| Aspect | OpenRouter | FreelOAder |
 |---|---|---|
 | Cost model | Pay-per-token, no ceiling | Fixed monthly subs, hard ceiling |
 | Routing trigger | Quality / speed / cost | **Quota availability** |
@@ -19,27 +19,41 @@ a consumable resource pool and only switches providers when quota runs low.
 
 ---
 
-## Architecture: OpenAI-compatible API frontend + authorized CLIs
+## Architecture: Dual OpenAI-compatible API frontend + authorized CLIs
 
-jRouter exposes a standard **OpenAI `/v1/chat/completions` HTTP API** and
-fulfills each request by dispatching to an authorized CLI session under the
-hood. Any client that speaks the OpenAI protocol — Hermes, Cursor, aider,
-continue.dev, raw curl — just points `base_url` at jRouter and it works.
+FreelOAder exposes **two** OpenAI-compatible HTTP API surfaces and fulfills
+each request by dispatching to an authorized CLI session under the hood. Any
+client that speaks either OpenAI protocol — Hermes, Cursor, aider,
+continue.dev, raw curl — just points `base_url` at FreelOAder and it works.
+
+### Two API surfaces
+
+| | Chat Completions (`/v1/chat/completions`) | Responses (`/v1/responses`) |
+|---|---|---|
+| State model | **Stateless** — client sends full message history every turn | **Stateful** — server holds conversation; client sends `previous_response_id` + new input |
+| Provider switching | Easy — full history available for replay into any backend | Requires FreelOAder to replay from its conversation log |
+| CLI mapping | Extra work: diff the incoming history against the resumed session to avoid reprocessing | Natural 1:1: `previous_response_id` maps to backend session id, shell out with resume flag |
+| Client compatibility | Broad — most tools use this today | Growing — newer OpenAI SDKs, Codex, agents framework |
+
+Both surfaces feed into the same pipeline: canonicalize → route → dispatch
+to CLI adapter → stream back. The difference is only at the edges — how the
+request is parsed and how the response is wrapped.
 
 ```
    OpenAI-compatible clients (Hermes, Cursor, aider, curl, …)
                          │
                          ▼
-        ┌────────────────────────────────┐
-        │  jRouter  (FastAPI frontend)   │
-        │   /v1/chat/completions         │
-        │   /v1/models                   │
-        │                                │
-        │   ├─ request translator        │
-        │   ├─ session manager           │
-        │   ├─ quota tracker             │
-        │   └─ CLI dispatcher            │
-        └────────────────┬───────────────┘
+        ┌─────────────────────────────────────┐
+        │  FreelOAder  (FastAPI frontend)     │
+        │   /v1/chat/completions (stateless)  │
+        │   /v1/responses        (stateful)   │
+        │   /v1/models                        │
+        │                                     │
+        │   ├─ request translator             │
+        │   ├─ session manager                │
+        │   ├─ quota tracker                  │
+        │   └─ CLI dispatcher                 │
+        └────────────────┬────────────────────┘
                          │
           ┌──────────────┼──────────────┐
           ▼              ▼              ▼
@@ -47,10 +61,21 @@ continue.dev, raw curl — just points `base_url` at jRouter and it works.
       (Claude Pro)  (ChatGPT+)    (Gemini Pro)
 ```
 
+### Why both APIs matter
+
+- **Chat Completions** is the lingua franca today — most tools use it.
+- **Responses API** is a more natural fit for CLI backends, which are
+  inherently session-based. The `previous_response_id` → backend session id
+  mapping avoids replaying the full history on every turn, saving the 6k–14k
+  token cold-cache tax.
+- Clients are migrating: OpenAI's own Codex CLI and agents SDK use the
+  Responses API. Supporting both means FreelOAder stays compatible as the
+  ecosystem shifts.
+
 ### Why OpenAI-API-in-front beats "fork Hermes"
 
 - **Universal surface.** Any OpenAI-compatible tool works with zero code
-  changes — including Hermes itself. jRouter becomes infrastructure, not a
+  changes — including Hermes itself. FreelOAder becomes infrastructure, not a
   fork.
 - **Clean separation.** Frontend = protocol translator. Backend = quota-aware
   CLI dispatcher. Each is independently testable.
@@ -59,22 +84,25 @@ continue.dev, raw curl — just points `base_url` at jRouter and it works.
 
 ### Component responsibilities
 
-**jRouter frontend (new):**
-1. Serve `/v1/chat/completions` (streaming + non-streaming) and `/v1/models`.
+**FreelOAder frontend (new):**
+1. Serve `/v1/chat/completions` (stateless, streaming + non-streaming),
+   `/v1/responses` (stateful, streaming + non-streaming), and `/v1/models`.
 1. Translate OpenAI requests into CLI stdin prompts; translate CLI stdout
-   back into OpenAI SSE deltas.
-1. Maintain `{conversation_id → CLI process}` mapping with idle timeout and
-   crash restart.
+   back into OpenAI SSE deltas (chat completions) or Responses API events.
+1. Maintain `{conversation_id → (provider, backend_session_id)}` bindings.
+   For the Responses API, map `previous_response_id` directly to the
+   backend session id. For chat completions, diff incoming history against
+   the stored conversation to extract the new turn.
 1. Track per-subscription quota in real time; switch providers on
    threshold breach; schedule workload across the billing cycle.
 
 **CLI backends (existing, unchanged):**
 - `claude` (Claude Code), `codex`, `gemini` — each runs as a persistent
-  authorized subprocess with stdin/stdout bridged to jRouter.
+  authorized subprocess with stdin/stdout bridged to FreelOAder.
 
 **Clients (existing, unchanged):**
 - Hermes Agent provides memory, skills, user modeling, and the agent loop.
-  It talks to jRouter as a plain OpenAI endpoint.
+  It talks to FreelOAder as a plain OpenAI endpoint.
 
 ---
 
@@ -96,9 +124,9 @@ continue.dev, raw curl — just points `base_url` at jRouter and it works.
    non-interactive print modes (`claude -p`, `gemini -p`, `codex exec`) that
    emit JSONL events on stdout and exit when the turn is done, and all
    three support resuming a prior session by id on the next invocation. No
-   persistent pty, no `/clear`, no tmux. The "session" in jRouter becomes a
+   persistent pty, no `/clear`, no tmux. The "session" in FreelOAder becomes a
    vendor-specific id string stored in the conversation log, and each turn
-   is a fresh shell-out. What's left of this problem: mapping jRouter's
+   is a fresh shell-out. What's left of this problem: mapping FreelOAder's
    `conversation_id` to whichever id shape each backend uses (claude:
    client-chosen UUID; gemini: server-assigned index; codex: server-assigned
    thread_id), and handling the first-turn case where the id doesn't exist
@@ -123,7 +151,7 @@ continue.dev, raw curl — just points `base_url` at jRouter and it works.
    remains heuristic (token accumulation + 429 detection), but claude's
    path can now be exact.
 
-1. **Cross-provider context drift.** When jRouter switches provider
+1. **Cross-provider context drift.** When FreelOAder switches provider
    mid-conversation, history must be replayed into the new CLI. Different
    models interpret the same context differently; structured markdown memory
    (Hermes-style) mitigates but does not eliminate this.
@@ -155,7 +183,7 @@ and #3 and turns the pty / `/clear` / tmux plan into dead code.
 | Baseline token overhead per cold call | ~9800 cache-creation (Claude Code agent prompt) | ~6000 input (Gemini system prompt) | ~14000 input, ~3500 cached (codex agent prompt) |
 | Reports cost per turn | Yes, `total_cost_usd` in `result` event | No (token stats only) | No (token stats only) |
 | Explicit quota signal | **Yes** — `rate_limit_event` with `rateLimitType`, `status`, `resetsAt` | No (inferred from usage + errors) | No (inferred from usage + errors) |
-| `--bare` / API-key-only mode | Exists but refuses OAuth — unusable for subscription-mode jRouter | N/A | N/A |
+| `--bare` / API-key-only mode | Exists but refuses OAuth — unusable for subscription-mode FreelOAder | N/A | N/A |
 
 ### Event shapes (representative)
 
@@ -202,13 +230,13 @@ and #3 and turns the pty / `/clear` / tmux plan into dead code.
   input tokens of agent-prompt overhead. Under subscription auth there's
   no `--bare` mode to avoid this. Keep requests to the same conversation
   within the vendor's prompt-cache window (claude's is 1 hour) to keep
-  per-turn cost down. If jRouter itself goes idle for >1h, the first
+  per-turn cost down. If FreelOAder itself goes idle for >1h, the first
   request back will pay the cold-cache tax.
 - **Agent-loop contamination is unavoidable under OAuth.** In the spike,
   asking claude to "remember 42, reply 'ok'" produced `num_turns: 3` —
   the CLI did internal agent work the client didn't request. The backend
   CLIs are framed by their own system prompts as tool-wielding agents;
-  under subscription auth we cannot replace those prompts. jRouter must
+  under subscription auth we cannot replace those prompts. FreelOAder must
   treat `num_turns > 1` and unexpected tool use as *observable* (log them
   in the per-turn record) but not *preventable*. Design decision #3
   (sandboxed filesystem) is still the right defense against blast radius,
@@ -270,12 +298,12 @@ implicit state at this layer, so keep it explicit.
 ### 3. Decouple conversations from backend sessions
 
 - **Conversation** — the OpenAI-level history the client sees. Owned by
-  jRouter, persisted as append-only JSONL.
+  FreelOAder, persisted as append-only JSONL.
 - **Backend session** — a vendor-side conversation the CLI can resume from
   (claude UUID, gemini index, codex thread id). Stored as a string on the
   conversation record. Not a live process.
 - **Binding** — current `{conversation_id → (provider, backend_session_id)}`,
-  *revocable*. When jRouter switches provider mid-conversation, the
+  *revocable*. When FreelOAder switches provider mid-conversation, the
   binding is rewritten to point at a new (provider, backend_session_id)
   pair and history is replayed into the new backend on the next turn.
 
@@ -314,10 +342,19 @@ and routing decisions are debuggable after the fact by replaying the log.
 lines: parse, canonicalize, call `router.dispatch(conversation,
 canonical_messages)`, stream the result back. No quota logic, no adapter
 awareness, no session management. If a handler is doing anything
-interesting, it belongs in the router or the adapter. This also makes
-adding `/v1/responses` cheap — same pipeline, different wrapper — which
-matters because Hermes's Codex/GPT-5 path calls `client.responses.create()`
-directly with no fallback to chat completions.
+interesting, it belongs in the router or the adapter.
+
+The two handlers differ only at the edges:
+- **Chat Completions** — parse the full `messages` array, diff against
+  stored history to find the new turn(s), wrap the response as a
+  `ChatCompletion` or SSE deltas.
+- **Responses** — resolve `previous_response_id` to a conversation +
+  backend session id, send only the new `input`, wrap the response as a
+  `Response` object with an `id` the client can reference next turn.
+
+Same pipeline, different wrappers. This matters because Hermes's Codex/GPT-5
+path calls `client.responses.create()` directly with no fallback to chat
+completions.
 
 ### 7. Observability from day one
 
@@ -343,7 +380,7 @@ otherwise eats weekends.
 
 - **No CLI plugin system.** Three hardcoded adapters behind the Protocol is
   fine. A plugin loader is a tax on a personal-use prototype.
-- **No session persistence across jRouter restarts.** Tempting with tmux,
+- **No session persistence across FreelOAder restarts.** Tempting with tmux,
   but the state machine then has to reconcile with whatever the CLI was
   doing when you died. Restart fresh, replay from the conversation log.
 - **No unified stream parser.** Each CLI gets its own stream parser
@@ -385,13 +422,13 @@ decisions, not research — change them deliberately, not by drift.
    hard problem #1.
 
 1. **Model names are a virtual namespace.** `/v1/models` advertises
-   `jrouter/auto` (router picks by quota), plus `jrouter/claude`,
-   `jrouter/codex`, `jrouter/gemini` for clients that want to pin a
+   `freeloader/auto` (router picks by quota), plus `freeloader/claude`,
+   `freeloader/codex`, `freeloader/gemini` for clients that want to pin a
    backend. Unknown model names error with `400`. The client's `model`
    field is the routing input, not a passthrough to the CLI.
 
 1. **Cancellation on client disconnect.** When the HTTP client drops the
-   SSE stream, jRouter sends `SIGTERM` to the backend CLI subprocess and
+   SSE stream, FreelOAder sends `SIGTERM` to the backend CLI subprocess and
    marks the turn `cancelled` in its state machine. If the process doesn't
    exit within 3s, `SIGKILL`. The conversation's last turn is marked
    incomplete in the log; the backend session id is preserved if the
@@ -423,14 +460,14 @@ decisions, not research — change them deliberately, not by drift.
    per-provider quota hit, `500` adapter bug (logged with traceback),
    `503` all configured backends unhealthy. Error bodies follow OpenAI's
    `{error: {message, type, code}}` shape so Hermes and other clients
-   don't need jRouter-specific branches.
+   don't need FreelOAder-specific branches.
 
-1. **Config surface.** `jrouter.toml` for the adapter list, model-name
+1. **Config surface.** `freeloader.toml` for the adapter list, model-name
     mapping, quota thresholds, timeouts, and data dir. Env vars
-    (`JROUTER_API_KEY`, `JROUTER_BIND`, `JROUTER_DATA_DIR`) for secrets
+    (`FREELOADER_API_KEY`, `FREELOADER_BIND`, `FREELOADER_DATA_DIR`) for secrets
     and deploy-time overrides. No runtime config reloading in the MVP.
 
-1. **Python 3.11+, `src/jrouter/` layout, `pyproject.toml`, `uv`.**
+1. **Python 3.11+, `src/freeloader/` layout, `pyproject.toml`, `uv`.**
     Locked before the first file lands. 3.11 for `asyncio.TaskGroup`,
     `Self` type, and the better error locations.
 
@@ -466,7 +503,7 @@ CLI per turn — no persistent processes.)*
    [-r <uuid>] --add-dir <scratch>` per turn, parse JSONL on stdout, assemble
    the final assistant message, return an OpenAI `ChatCompletion` response.
    Strip client-sent `tools` for now. Store `backend_session_id` on the
-   conversation. Prove end-to-end: `curl` → jRouter → claude → response,
+   conversation. Prove end-to-end: `curl` → FreelOAder → claude → response,
    two turns in the same conversation with context carrying over.
 1. **Add streaming.** Map JSONL events to OpenAI SSE deltas live (tiny
    field-mapper — no stream parsing). Also wire cancellation: client
@@ -490,7 +527,7 @@ CLI per turn — no persistent processes.)*
 ## Key risks (ranked)
 
 1. **ToS exposure** — blocks any public/shared deployment.
-1. **Tool-call translation** — determines whether jRouter is usable by agent
+1. **Tool-call translation** — determines whether FreelOAder is usable by agent
    frameworks or only by simple chat clients.
 1. **Cross-provider context drift** — switching providers mid-conversation is
    the core value prop and the hardest correctness problem.

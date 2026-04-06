@@ -1,10 +1,13 @@
-# jRouter
+# FreelOAder
 
 A unified AI gateway that routes OpenAI-compatible API requests across
 **existing CLI subscriptions** (Claude Pro, ChatGPT Plus, Gemini Pro) to hit
 a **fixed monthly cost ceiling** equal to the sum of those subscription fees.
 
-Unlike OpenRouter's pay-per-token model, jRouter treats each subscription's
+You paid for three all-you-can-eat buffets. FreelOAder makes sure you never
+hit the "sir, please leave" moment at any single one.
+
+Unlike OpenRouter's pay-per-token model, FreelOAder treats each subscription's
 quota as a consumable resource pool and only switches providers when quota
 runs low.
 
@@ -19,7 +22,7 @@ runs low.
                          │
                          ▼
         ┌────────────────────────────────┐
-        │  jRouter  (FastAPI frontend)   │
+        │  FreelOAder  (FastAPI frontend)   │
         │   /v1/chat/completions         │
         │   /v1/models                   │
         └────────────────┬───────────────┘
@@ -80,6 +83,6 @@ the next phase begins. See `ROADMAP.md` for the gates.
 
 - Public or multi-tenant deployment (ToS)
 - Tool-call translation in the MVP (deferred to phase 5)
-- Session persistence across jRouter restarts
+- Session persistence across FreelOAder restarts
 - A CLI plugin system
 - A unified stream parser across vendors
