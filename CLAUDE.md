@@ -13,11 +13,11 @@ property of the repo itself.
 
 This environment has the [`gstack`](https://github.com/) skill suite
 installed, exposed as slash-command skills. They are build-time tools
-available to you, the agent — they are **not** dependencies of jRouter
+available to you, the agent — they are **not** dependencies of FreelOAder
 itself and must never be imported, vendored, or referenced from code
 under `src/`.
 
-Skills likely to be useful while building jRouter:
+Skills likely to be useful while building FreelOAder:
 
 - **`/investigate`** — root-cause debugging with an explicit investigate →
   analyze → hypothesize → implement loop. Use when a gate fails in a
@@ -30,7 +30,7 @@ Skills likely to be useful while building jRouter:
   Useful for adversarial review of adapter code, where quiet bugs in
   JSONL parsing or cancellation paths hide easily.
 - **`/careful`** / **`/freeze`** / **`/guard`** — safety guardrails. Use
-  `/freeze src/jrouter/adapters/claude` during phase 1 to prevent
+  `/freeze src/freeloader/adapters/claude` during phase 1 to prevent
   accidental edits to unrelated modules. `/careful` is worth enabling
   whenever touching subprocess lifecycle code.
 - **`/simplify`** — post-edit review for reuse, quality, efficiency.
@@ -43,12 +43,12 @@ Skills likely to be useful while building jRouter:
 Skills **not** applicable to this repo:
 
 - Browser/QA skills (`/qa`, `/browse`, `/design-review`, `/canary`,
-  `/benchmark`, `/connect-chrome`, `/setup-browser-cookies`) — jRouter
+  `/benchmark`, `/connect-chrome`, `/setup-browser-cookies`) — FreelOAder
   has no web UI.
 - Design skills (`/design-shotgun`, `/design-html`, `/design-consultation`,
-  `/plan-design-review`) — jRouter is a local API proxy, not a product
+  `/plan-design-review`) — FreelOAder is a local API proxy, not a product
   with a visual surface.
-- Deploy skills (`/ship`, `/land-and-deploy`, `/setup-deploy`) — jRouter
+- Deploy skills (`/ship`, `/land-and-deploy`, `/setup-deploy`) — FreelOAder
   is personal-use and must not be deployed publicly (see `PLAN.md` on
   ToS).
 

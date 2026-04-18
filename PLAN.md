@@ -265,6 +265,7 @@ class CLIAdapter(Protocol):
         messages: list[CanonicalMessage],
         *,
         backend_session_id: str | None,
+        system: str | None = None,
     ) -> AsyncIterator[Delta]: ...
     async def health(self) -> QuotaState: ...
 ```
@@ -272,7 +273,12 @@ class CLIAdapter(Protocol):
 `send()` shells out to the backend CLI for one turn, yields canonical
 deltas parsed from the CLI's JSONL stream, and yields a final delta
 carrying the vendor's `backend_session_id` so the router can store it on
-the conversation for the next turn. No `clear()` (each shell-out starts
+the conversation for the next turn. The `system` parameter carries the
+client's system message (if any) so each adapter can decide how to inject
+it — the slot has to live on the Protocol from day one, because the
+phase-5 tool-call shim (hard problem #1) requires the adapter to own the
+system-prompt slot, and retrofitting the signature after three adapters
+exist is a three-way rewrite. No `clear()` (each shell-out starts
 clean), no `close()` (no persistent process). Everything above the seam —
 `/v1/chat/completions`, `/v1/responses`, quota tracker, router — talks
 only to `CLIAdapter`. Everything below — vendor CLI flags, JSONL event
@@ -325,6 +331,18 @@ with converters on both edges: `openai_to_canonical`,
 Responses-API-vs-Chat-Completions split on the client side is the same
 problem you're about to have on the backend side. Solve it once, in the
 middle.
+
+**History diff lives here, not in the frontend.** `/v1/chat/completions`
+is stateless — the client resends the full `messages` array every turn,
+which may include edits, regenerations, reordered system messages, and
+multimodal blocks. Figuring out "what's new this turn" versus "what was
+already sent" is non-trivial and can't live in the ~50-line handler
+(principle #6) or in the text-in/text-out adapter (decision #3). Put it
+in `src/freeloader/canonical/history_diff.py` alongside the other
+canonical converters. The frontend calls `diff_against_stored(conversation,
+incoming_messages) → new_turn_messages`; the router sees only the new
+turn. The Responses API path skips this module entirely — its
+`previous_response_id` makes the diff trivial.
 
 ### 5. Quota as an event stream, not a counter
 
@@ -473,15 +491,17 @@ decisions, not research — change them deliberately, not by drift.
 
 ### Still open — need per-CLI investigation
 
-- **System prompt handling.** OpenAI clients send a `system` message.
-  Each CLI has its own baked-in system prompt and may or may not expose a
-  slot to inject or replace it. The three options — prepend as the first
-  user turn with a marker, use a CLI-specific injection mechanism, or
-  ignore the client's system message — probably need to be chosen *per
-  adapter*. Resolve during MVP step 1 for `claude`; revisit per adapter
-  thereafter. This affects the `CLIAdapter.send()` signature: it may need
-  a separate `system: str | None` parameter instead of only a message
-  list.
+- **System prompt handling — Protocol shape resolved; per-adapter strategy
+  still open.** The Protocol carries `system: str | None = None` (see
+  principle #1), so the slot exists from day one. What each adapter
+  *does* with the slot is still per-CLI: claude exposes
+  `--system-prompt` / `--append-system-prompt` (limited under OAuth);
+  gemini has no obvious injection point from top-level help; codex allows
+  injection via `-c` config overrides. The three fallback options —
+  prepend as the first user turn with a marker, use a CLI-specific
+  injection mechanism, or ignore the client's system message — are
+  chosen *per adapter*. `ClaudeAdapter` resolves its choice during MVP
+  step 1; the other two during step 3.
 
 - **Tool-call story** (already deferred — hard problem #1, MVP step 5).
   The filesystem decision above settles the *backend* half (CLI native

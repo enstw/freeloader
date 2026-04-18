@@ -1,4 +1,4 @@
-# jRouter Roadmap
+# FreelOAder Roadmap
 
 Five phases, one per MVP step in `PLAN.md`. Each phase has a gate script at
 `scripts/gate_<n>.sh` that must exit 0 before the next phase begins. Gates
@@ -28,6 +28,12 @@ the per-turn log (principle #7).
 - Scratch cwd is created per turn under the configured data dir; backend
   cannot read project files.
 - Golden JSONL fixture replay test for `ClaudeAdapter` exists and is green.
+- `src/freeloader/canonical/history_diff.py` exists with a
+  `diff_against_stored(conversation, incoming_messages) -> new_turn_messages`
+  entry point and a unit test covering (a) append-only new turn,
+  (b) client regeneration replacing the last assistant turn,
+  (c) mismatch (raise) when stored history diverges from the prefix of
+  `incoming_messages`.
 - `JOURNAL.jsonl` contains a per-turn record with `{conversation_id,
   backend_session_id, provider, outcome, usage}`.
 
@@ -69,8 +75,8 @@ thread_id) — if the seam is wrong, this is where it shows.
 **Exit criteria.**
 - The same contract test suite (phase 1 golden-style) runs green against
   all three adapters.
-- `/v1/models` advertises `jrouter/auto`, `jrouter/claude`, `jrouter/codex`,
-  `jrouter/gemini`.
+- `/v1/models` advertises `freeloader/auto`, `freeloader/claude`, `freeloader/codex`,
+  `freeloader/gemini`.
 - Round-robin router cycles providers per new conversation.
 - Provider switch mid-conversation: `bind(conversation, new_provider)`
   replays canonical history into the new backend's first turn, then
@@ -100,7 +106,7 @@ proposition. Principle #5: quota is an event stream, not a counter.
   threshold breach.
 - Replay test: given a fixture JOURNAL, the router makes deterministic
   routing decisions — no wall-clock dependency.
-- Thresholds and weights come from `jrouter.toml`.
+- Thresholds and weights come from `freeloader.toml`.
 
 **Gate.** `scripts/gate_4.sh`
 
@@ -129,8 +135,8 @@ proposition. Principle #5: quota is an event stream, not a counter.
 
 - `ruff check` and `ruff format --check` are green.
 - `pytest` is green.
-- `src/jrouter/` is the only package root; no top-level modules.
-- No file in `src/jrouter/frontend/` imports from `src/jrouter/adapters/*`
+- `src/freeloader/` is the only package root; no top-level modules.
+- No file in `src/freeloader/frontend/` imports from `src/freeloader/adapters/*`
   directly — frontend talks to the router, router talks to adapters.
 - `JOURNAL.jsonl` is append-only: the gate diffs it against the previous
   commit and fails if any line was removed or rewritten.

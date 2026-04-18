@@ -1,4 +1,4 @@
-# jRouter status — 2026-04-05
+# FreelOAder status — 2026-04-05
 
 ## Phase: 1/5 — ClaudeAdapter, non-streaming, single conversation
 ## Step: 1.0 — scaffolding (pre-code)
@@ -26,7 +26,7 @@ Exit criteria (open):
   - [x] .gitignore
   - [ ] First commit containing the scaffolding
 
-Next step after this: 1.1 — pyproject.toml, src/jrouter/ skeleton, uv lock
+Next step after this: 1.1 — pyproject.toml, src/freeloader/ skeleton, uv lock
 Blockers: none
 
 Recent lessons to keep in mind (see JOURNAL.jsonl for full text):

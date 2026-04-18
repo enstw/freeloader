@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# orient.sh — single entry point for "where am I" in the jRouter build loop.
+# orient.sh — single entry point for "where am I" in the FreelOAder build loop.
 #
 # Prints STATUS, recent lessons/surprises, runs the current phase gate, and
 # tells you what to do next. Run this before touching any code.

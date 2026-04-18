@@ -75,7 +75,7 @@ the next phase begins. See `ROADMAP.md` for the gates.
 - Python 3.11+
 - FastAPI frontend
 - `uv` for dependency management
-- `src/jrouter/` layout, `pyproject.toml`
+- `src/freeloader/` layout, `pyproject.toml`
 - Backends: `claude` (Claude Code), `gemini`, `codex` — all invoked as
   subprocesses per turn, no persistent processes
 

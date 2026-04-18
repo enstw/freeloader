@@ -60,7 +60,7 @@ Re-read `PLAN.md` § "Things to explicitly *not* do" at every phase
 boundary. Specifically:
 
 - No CLI plugin system.
-- No session persistence across jRouter restarts.
+- No session persistence across FreelOAder restarts.
 - No unified stream parser — each CLI gets its own JSONL→delta mapper.
 - No tool calls in the MVP (deferred to phase 5).
 

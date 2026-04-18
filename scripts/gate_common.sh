@@ -47,9 +47,9 @@ gate_common_invariants() {
   # No rewrites of past journal lines in this commit (if git history has >1 commit).
   if git rev-parse HEAD~1 >/dev/null 2>&1; then
     gate_check "JOURNAL.jsonl is append-only vs HEAD~1" bash -c '
-      git show HEAD~1:JOURNAL.jsonl 2>/dev/null > /tmp/jrouter_journal_prev || exit 0
-      head -n "$(wc -l < /tmp/jrouter_journal_prev)" JOURNAL.jsonl \
-        | diff -q - /tmp/jrouter_journal_prev >/dev/null
+      git show HEAD~1:JOURNAL.jsonl 2>/dev/null > /tmp/freeloader_journal_prev || exit 0
+      head -n "$(wc -l < /tmp/freeloader_journal_prev)" JOURNAL.jsonl \
+        | diff -q - /tmp/freeloader_journal_prev >/dev/null
     '
   fi
 
@@ -58,7 +58,7 @@ gate_common_invariants() {
     gate_check "ruff check clean" ruff check src tests
     gate_check "ruff format clean" ruff format --check src tests
     gate_check "pytest green" pytest -q
-    gate_check "src/jrouter/ package root exists" test -d src/jrouter
+    gate_check "src/freeloader/ package root exists" test -d src/freeloader
   else
     _gate_note "skip" "python checks (no pyproject.toml yet)"
   fi

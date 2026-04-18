@@ -10,7 +10,7 @@ __pycache__/
 # uv
 .uv/
 
-# jRouter runtime data (conversation logs, scratch dirs)
+# FreelOAder runtime data (conversation logs, scratch dirs)
 data/
 scratch/
 

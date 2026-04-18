@@ -12,11 +12,11 @@ echo "─ phase 3 specific ─"
 
 gate_check "phase 2 gate still green" scripts/gate_2.sh
 
-gate_check "GeminiAdapter exists" test -f src/jrouter/adapters/gemini.py
-gate_check "CodexAdapter exists"  test -f src/jrouter/adapters/codex.py
-gate_check "router module exists" test -f src/jrouter/core/router.py
+gate_check "GeminiAdapter exists" test -f src/freeloader/adapters/gemini.py
+gate_check "CodexAdapter exists"  test -f src/freeloader/adapters/codex.py
+gate_check "router module exists" test -f src/freeloader/core/router.py
 gate_check "round-robin strategy exists" \
-  test -f src/jrouter/core/routing/round_robin.py
+  test -f src/freeloader/core/routing/round_robin.py
 
 gate_check "contract test suite runs against all 3 adapters" \
   test -f tests/adapters/test_contract_all.py

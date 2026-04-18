@@ -14,9 +14,9 @@ echo "─ phase 2 specific ─"
 gate_check "phase 1 gate still green" scripts/gate_1.sh
 
 gate_check "SSE streaming handler exists" \
-  test -f src/jrouter/frontend/sse.py
+  test -f src/freeloader/frontend/sse.py
 gate_check "turn state machine module exists" \
-  test -f src/jrouter/core/turn_state.py
+  test -f src/freeloader/core/turn_state.py
 gate_check "turn state machine unit tests" \
   test -f tests/core/test_turn_state.py
 gate_check "disconnect test: no zombie subprocesses" \
