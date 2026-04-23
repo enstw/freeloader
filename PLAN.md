@@ -267,35 +267,67 @@ class CLIAdapter(Protocol):
         backend_session_id: str | None,
         system: str | None = None,
     ) -> AsyncIterator[Delta]: ...
-    async def health(self) -> QuotaState: ...
 ```
 
-`send()` shells out to the backend CLI for one turn, yields canonical
-deltas parsed from the CLI's JSONL stream, and yields a final delta
-carrying the vendor's `backend_session_id` so the router can store it on
-the conversation for the next turn. The `system` parameter carries the
-client's system message (if any) so each adapter can decide how to inject
-it — the slot has to live on the Protocol from day one, because the
-phase-5 tool-call shim (hard problem #1) requires the adapter to own the
-system-prompt slot, and retrofitting the signature after three adapters
-exist is a three-way rewrite. No `clear()` (each shell-out starts
-clean), no `close()` (no persistent process). Everything above the seam —
-`/v1/chat/completions`, `/v1/responses`, quota tracker, router — talks
-only to `CLIAdapter`. Everything below — vendor CLI flags, JSONL event
-schema, token-accounting quirks, system-prompt injection tricks — lives
-inside a concrete adapter (`ClaudeAdapter`, `CodexAdapter`,
-`GeminiAdapter`). Tool calls (#1), streaming (#3), quota (#4), and context
-drift (#5) all have CLI-specific shapes; if the frontend reaches past the
-adapter, every new CLI becomes a refactor.
+`Delta` is a tagged union, not a flat "chunk" record:
+
+```python
+Delta = TextDelta | SessionIdDelta | UsageDelta | RateLimitDelta
+```
+
+Each variant carries exactly one kind of information: a text chunk for
+streaming, a backend-assigned session id for persistence, per-turn token
+usage, or a vendor rate-limit event. The frontend pattern-matches on the
+variant rather than parsing positionally. This matters because every
+adapter interleaves these on a single stream (claude emits
+`rate_limit_event` and `result` records alongside `assistant` messages)
+and the frontend has to dispatch them to different destinations — text
+to SSE, session id to the conversation record, usage and rate-limit to
+the quota event log. A flat `Delta` with "the last one has the session
+id" semantics was the original shape and is wrong; variants must be
+distinguishable at every yield.
+
+`send()` shells out to the backend CLI for one turn, yields
+appropriately-typed deltas parsed from the CLI's JSONL stream, and
+returns when the subprocess exits. The adapter yields exactly one
+`SessionIdDelta` the first time a backend assigns a session id for a new
+conversation, at least one `UsageDelta` on a successful turn, and any
+number of `RateLimitDelta` events the vendor emits.
+
+The `system` parameter carries the client's system message (if any) so
+each adapter can decide how to inject it — the slot has to live on the
+Protocol from day one, because the phase-5 tool-call shim (hard problem
+#1) requires the adapter to own the system-prompt slot, and retrofitting
+the signature after three adapters exist is a three-way rewrite.
+
+No `health()` in the MVP Protocol — quota is an event stream (principle
+#5), not a probe; phase 4 adds `probe_quota()` only if a routing
+decision needs to happen before the first turn fires. No `clear()`
+(each shell-out starts clean), no `close()` (no persistent process).
+
+Everything above the seam — `/v1/chat/completions`, `/v1/responses`,
+quota tracker, router — talks only to `CLIAdapter`. Everything below —
+vendor CLI flags, JSONL event schema, token-accounting quirks,
+system-prompt injection tricks — lives inside a concrete adapter
+(`ClaudeAdapter`, `CodexAdapter`, `GeminiAdapter`). Tool calls (#1),
+streaming (#3), quota (#4), and context drift (#5) all have CLI-specific
+shapes; if the frontend reaches past the adapter, every new CLI becomes
+a refactor.
 
 ### 2. Turns are state machines, not requests
 
 *(Revised after the 2026-04-05 spike.)* There are no persistent CLI
 processes to machine-model — each turn shells out, streams, and exits. The
 state machine lives one level up, at the *turn* granularity:
-`queued → spawning → streaming → drained → logged`, plus `cancelled`,
-`backend_error`, `rate_limited`, `timed_out`. One mutex per conversation
-(turns in the same conversation serialize, per design decision #1), one
+`queued → spawning → streaming → complete`, with terminal states
+`{complete, cancelled, backend_error, rate_limited, timed_out}`.
+Reaching a terminal state atomically writes the per-turn JOURNAL entry
+— there is no separate "logged" state, because a window where the turn
+exists in conversation history but not the journal is a consistency gap
+(process crash → the two disagree on the outcome). Journal-write
+failures surface as `adapter_error` to the client. One mutex per
+conversation (turns in the same conversation serialize, per design
+decision #1), one
 state enum, one "is this turn still live" predicate. The common bugs — a
 stale turn leaking output after a client disconnect, a crashed CLI looking
 idle, a rate-limited backend racing with a router retry — all come from
@@ -317,6 +349,17 @@ Put the replay logic in one place: `bind(conversation, provider)`. First
 call to a new backend = no `backend_session_id`, replay full history into
 the first turn's prompt. Subsequent calls = pass the stored id back via
 the backend's resume flag.
+
+**Replay scope.** The canonical history replayed into a new backend
+contains only the client-visible turns — user messages and
+final-assistant-message turns. Intermediate agent contamination
+(claude's `num_turns > 1` from a single client turn — internal tool
+work the client didn't request) is preserved in metadata but not
+replayed, because the OpenAI chat surface only exposes user +
+assistant roles and the contamination was never part of the
+conversation the client thinks it's having. Lossy with respect to the
+backend's own reasoning trace; faithful to the client-visible
+conversation.
 
 ### 4. Canonical message format in the middle
 
@@ -343,6 +386,15 @@ canonical converters. The frontend calls `diff_against_stored(conversation,
 incoming_messages) → new_turn_messages`; the router sees only the new
 turn. The Responses API path skips this module entirely — its
 `previous_response_id` makes the diff trivial.
+
+**MVP scope.** Three supported diff outcomes: (a) append-only new turn,
+(b) client regeneration replacing the last assistant turn, (c) mismatch
+when stored history diverges from the prefix of `incoming_messages` →
+raise. Mid-history edits (client replays with turn N changed and N+1
+onward unchanged) are a fourth case and raise 400 for the MVP. Adding
+truncate-and-replay semantics is cheap once the three-case spine works;
+pre-building it is scope creep (AGENT.md § scope discipline). Revisit
+in phase 5 if a real client surfaces the need.
 
 ### 5. Quota as an event stream, not a counter
 
@@ -408,6 +460,18 @@ otherwise eats weekends.
   the output-parsing shim only works if the adapter owns the system-prompt
   slot — make sure that slot stays under adapter control so the option
   remains open.
+- **No static type checker in the gate.** mypy/pyright are fine to run
+  ad-hoc; keeping them out of `scripts/gate_*.sh` avoids fighting
+  `Protocol` + `asyncio` + duck-typed adapters over what is a ~500-line
+  prototype. Revisit at phase 3 when three adapters exist and the
+  Protocol contract is load-bearing.
+- **No CI, no pre-commit hooks.** Gates run locally
+  (`scripts/gate_<n>.sh`). Personal-use / single-developer repo; a
+  GitHub Actions workflow is overhead the MVP never pays back. Revisit
+  if collaborators appear.
+- **No pytest plugins beyond pytest itself.** `tests/conftest.py` with
+  plain fixtures is enough. `pytest-asyncio` is the one likely exception
+  (required for async test functions); decide at step 1.1 if needed.
 
 ---
 
@@ -454,11 +518,24 @@ decisions, not research — change them deliberately, not by drift.
    otherwise the conversation stays unbound until the next turn starts
    fresh.
 
-1. **Conversation log: append-only JSONL.** One file per conversation
-   under a configurable data dir. Each line is a canonical message plus
-   metadata (timestamp, provider, backend_session_id, outcome, usage).
-   Crash-safe, human-readable, trivially replayable when rebinding a
-   conversation to a new backend (principle #3). No SQLite, no migrations.
+1. **Two logs, one format — both append-only JSONL.**
+   - `JOURNAL.jsonl` (global, repo root): one line per event —
+     build-time (`decision`, `lesson`, `step_*`, `phase_*`), runtime
+     per-turn (`turn_done` with `{conversation_id, backend_session_id,
+     provider, outcome, usage}`), and quota signals (`rate_limit_event`,
+     `spawn_error`). Router reads a derived view over this file
+     (principle #5); scanning per-conversation files per routing
+     decision doesn't scale and isn't where quota events live.
+   - `<data_dir>/<conversation_id>.jsonl` (per conversation): one line
+     per canonical message (user/assistant turn + metadata). Used for
+     replay when rebinding to a new backend (principle #3). Not read by
+     the router.
+
+   Crash-safe, human-readable, no SQLite, no migrations. Concurrent
+   writers within the server share a single-writer asyncio lock per
+   file (POSIX `O_APPEND` is atomic only under `PIPE_BUF`, which a long
+   assistant message can exceed). `scripts/reflect.sh` is single-process
+   so safe as-is.
 
 1. **Token estimation: `len(text) // 4`.** Quota is event-driven
    (principle #5), so token counts only need to be good enough to detect
@@ -488,6 +565,26 @@ decisions, not research — change them deliberately, not by drift.
 1. **Python 3.11+, `src/freeloader/` layout, `pyproject.toml`, `uv`.**
     Locked before the first file lands. 3.11 for `asyncio.TaskGroup`,
     `Self` type, and the better error locations.
+
+1. **HTTP framework: FastAPI.** async-native, first-class SSE via
+    `StreamingResponse`, built-in OpenAPI docs, cheap to swap for
+    Starlette if ever needed (FastAPI is Starlette + Pydantic + dep
+    injection). Chosen over raw Starlette because Pydantic request
+    validation matches OpenAI's JSON Schema client-error shapes with
+    zero glue. Chosen over Hypercorn/Quart because FastAPI is what every
+    example OpenAI-compatible proxy uses, so clients debugging against
+    FreelOAder see familiar error shapes.
+
+1. **Runtime logging: stdlib `logging`; events: `JOURNAL.jsonl`.** Two
+    audiences, two destinations. stdlib `logging` (default `WARNING`,
+    `INFO` with `FREELOADER_LOG_LEVEL=info`) for server-runtime
+    diagnostics: port binding, adapter spawn failures, unhandled
+    exceptions, request IDs for correlating stacktraces. `JOURNAL.jsonl`
+    for the architectural event stream: per-turn records, quota signals,
+    decisions/lessons/phase transitions. Operator-visible logs and
+    routing-relevant events have different retention, volume, and
+    consumers. No `structlog`, no `loguru` — stdlib can emit JSON via a
+    formatter if needed.
 
 ### Still open — need per-CLI investigation
 
