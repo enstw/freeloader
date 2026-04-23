@@ -703,7 +703,11 @@ decisions, not research — change them deliberately, not by drift.
     via a formatter if needed.
 
 1. **Chat Completions conversation identity: hash-of-prefix +
-    optional client header.** `/v1/chat/completions` is stateless;
+    optional client header.** *Provisional — adopted in round 2 of
+    the 1.0.5 architecture review before any code existed. Treat as
+    a sketch to verify when the `/v1/chat/completions` handler
+    actually lands (phase 1 / step 1.2); a real client's behavior
+    may shift the tradeoffs.* `/v1/chat/completions` is stateless;
     OpenAI has no `conversation_id` concept. FreelOAder computes a
     conversation key from a stable fingerprint of the message prefix:
     preceding system messages + the first user message, SHA-256'd.
@@ -720,7 +724,11 @@ decisions, not research — change them deliberately, not by drift.
     want stable ids). Revisit only if real clients demand more.
 
 1. **Responses API: FreelOAder-owned response IDs, internal mapping.**
-    Each `/v1/responses` response gets an opaque
+    *Provisional — adopted in round 2 of the 1.0.5 architecture
+    review before any code existed. The mapping shape has to survive
+    contact with a real Responses-API client; revisit when the
+    `/v1/responses` handler is implemented.* Each `/v1/responses`
+    response gets an opaque
     FreelOAder-generated `response_id` (e.g., `fr_resp_<uuid>`).
     Internally, the response_id maps to `(conversation_id, turn_id,
     backend_session_id at that turn)`. Clients that send
@@ -734,7 +742,13 @@ decisions, not research — change them deliberately, not by drift.
     that "`previous_response_id` → backend session id directly"
     leaked backend identity into the API shape.
 
-1. **CLI-side state isolation per conversation.** The sandboxed
+1. **CLI-side state isolation per conversation.** *Provisional —
+    adopted in round 3 of the 1.0.5 architecture review before any
+    code existed. The concrete env-var names and per-CLI behavior
+    must be confirmed empirically; revisit per adapter at
+    implementation time (claude: phase 1; codex / gemini: phase 3).
+    May turn out overbuilt if concurrent cross-conversation turns to
+    the same backend are rare in practice.* The sandboxed
     *cwd* from decision #3 is not enough. Each CLI stores session
     state (thread IDs, history caches, config) in a global location
     — `~/.claude/`, `~/.codex/`, `~/.config/gemini/` — so two

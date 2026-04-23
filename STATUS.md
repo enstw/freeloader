@@ -44,6 +44,12 @@ lessons.
 Step 1.0.5 totals across all three rounds: 30 findings, 22
 decisions, 5 deferred lessons.
 
+Post-review correction (2026-04-23): decisions #14, #15, #16 —
+added in rounds 2 and 3 — demoted to *provisional* in PLAN.md.
+They solve problems that reviewers imagined rather than code
+that hit them; step 1.1 proceeds without needing them frozen.
+Recorded as a JOURNAL lesson on review-round scope creep.
+
 Key revisions landed (cumulative):
   - principle #1 — Delta union (7 variants) + UsageDelta.models
     sub-model schema; no health() in MVP
@@ -58,11 +64,13 @@ Key revisions landed (cumulative):
     starts fresh session
   - decision #12 (new) — FastAPI
   - decision #13 (new) — stdlib logging + three-log split
-  - decision #14 (new) — chat-completions conversation identity
-    = hash-of-prefix + header override
-  - decision #15 (new) — Responses API owns response_id namespace
-  - decision #16 (new) — CLI state isolated per conversation via
-    env-var redirection (CLAUDE_CONFIG_DIR, CODEX_HOME, XDG_*)
+  - decision #14 (new, **provisional**) — chat-completions conversation
+    identity = hash-of-prefix + header override
+  - decision #15 (new, **provisional**) — Responses API owns
+    response_id namespace
+  - decision #16 (new, **provisional**) — CLI state isolated per
+    conversation via env-var redirection (CLAUDE_CONFIG_DIR,
+    CODEX_HOME, XDG_*)
   - phase-3 adapter order: codex → gemini
   - ROADMAP phase 1 — filesystem sandbox weakened to
     defense-in-depth; events move to <data_dir>/events.jsonl
