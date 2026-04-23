@@ -311,6 +311,28 @@ debugging but don't reach the client. Adding a new canonical variant
 is a deliberate decision, not an accident of whatever the vendor just
 shipped.
 
+`UsageDelta` schema is always keyed by sub-model, even for
+single-model providers:
+
+```python
+class UsageDelta:
+    models: dict[str, ModelUsage]  # { model_name: {input, output, cached?} }
+    # Top-level totals are derived (sum of models.values()).
+
+class ModelUsage:
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int = 0
+```
+
+Claude and codex report one entry (`{"claude-opus-4.6": {...}}`,
+`{"gpt-5.1-codex": {...}}`); gemini is a compound provider and can
+report multiple entries per turn (`{"gemini-3-flash-preview": {...},
+"gemini-2.5-flash-lite": {...}}`) — matching its `stats.models`
+breakdown from the 2026-04-05 spike. This is the only shape that
+supports per-sub-model quota tracking (principle #5) without
+discarding information.
+
 `send()` shells out to the backend CLI for one turn, yields
 appropriately-typed deltas parsed from the CLI's JSONL stream, and
 returns when the subprocess exits. On a successful turn the adapter
@@ -386,6 +408,51 @@ assistant roles and the contamination was never part of the
 conversation the client thinks it's having. Lossy with respect to the
 backend's own reasoning trace; faithful to the client-visible
 conversation.
+
+**Replay format.** Non-interactive CLIs take a *single text prompt*
+via stdin or argv, not a structured `[{role, content}, ...]` JSON
+array. Replaying multi-turn history means flattening the turn list
+into one prompt, which collapses role boundaries and lets prior
+assistant text become prompt-injection fuel unless explicit
+delimiters are used. The canonical flatten format is role-tagged
+plaintext:
+
+```
+[SYSTEM]
+<system message>
+[/SYSTEM]
+
+[USER]
+<turn 1 user>
+[/USER]
+
+[ASSISTANT]
+<turn 1 assistant final text>
+[/ASSISTANT]
+
+[USER]
+<turn 2 user>
+[/USER]
+
+...
+
+[USER]
+<current user turn — what the client is asking now>
+[/USER]
+```
+
+Each adapter may choose different delimiter tokens (claude may prefer
+XML-like `<user>…</user>` if its tokenizer biases that way; gemini
+may prefer `User:` / `Model:`; codex TBD) — the adapter owns the
+exact string, the canonical layer produces the role-tagged sequence.
+This replay is lossy compared to a native multi-turn API call and
+pays the cold-cache tax; it is only used on the *first* turn after a
+rebind (first call to a new backend, or resume flag can't be used).
+On subsequent turns the backend's native resume flag is used and
+only the new user turn is sent. Adapters that can pass structured
+input via a native mechanism (future `--input-format=json` flag, MCP
+channel, etc.) should — the flatten format is the floor, not the
+ceiling.
 
 ### 4. Canonical message format in the middle
 
@@ -535,14 +602,21 @@ decisions, not research — change them deliberately, not by drift.
    backend. Unknown model names error with `400`. The client's `model`
    field is the routing input, not a passthrough to the CLI.
 
-1. **Cancellation on client disconnect.** When the HTTP client drops the
-   SSE stream, FreelOAder sends `SIGTERM` to the backend CLI subprocess and
-   marks the turn `cancelled` in its state machine. If the process doesn't
-   exit within 3s, `SIGKILL`. The conversation's last turn is marked
-   incomplete in the log; the backend session id is preserved if the
-   backend already reported one (so the next turn can still resume),
-   otherwise the conversation stays unbound until the next turn starts
-   fresh.
+1. **Cancellation on client disconnect.** When the HTTP client drops
+   the SSE stream, FreelOAder sends `SIGTERM` to the backend CLI
+   subprocess; `SIGKILL` 3s later if still alive. The conversation's
+   last turn is marked `cancelled` in the runtime event log. The
+   `backend_session_id` reported during that turn (if any) is
+   **discarded**, not preserved: a SIGTERMed CLI leaves a partial
+   assistant generation in its local state, and the canonical history
+   (which omits the cancelled turn) no longer matches the backend's
+   view of the session. Resuming via that poisoned id would cause
+   permanent state drift — the backend would see `User → partial
+   assistant → User retry` while the canonical record shows
+   `User → User retry`. The conversation stays unbound until the
+   next turn starts fresh: a new session, canonical history replayed
+   in full via the role-tagged format (see principle #3). Cost: one
+   cold-cache tax on the recovery turn. Benefit: no state drift.
 
 1. **Three logs, one format — all append-only JSONL.** Different
    lifecycle, different storage, different audience.
@@ -659,6 +733,29 @@ decisions, not research — change them deliberately, not by drift.
     internal mapping table. This is the answer to codex's P1 critique
     that "`previous_response_id` → backend session id directly"
     leaked backend identity into the API shape.
+
+1. **CLI-side state isolation per conversation.** The sandboxed
+    *cwd* from decision #3 is not enough. Each CLI stores session
+    state (thread IDs, history caches, config) in a global location
+    — `~/.claude/`, `~/.codex/`, `~/.config/gemini/` — so two
+    concurrent turns on different conversations mutate the same
+    global state. Race conditions: gemini's `-r latest` resolves
+    to whichever session was last written; session-index
+    assignment can collide; context leaks between conversations.
+    Each CLI subprocess runs with an isolated state root at
+    `<data_dir>/cli-state/<conversation_id>/` and the CLI-specific
+    env var that redirects state there: `CLAUDE_CONFIG_DIR`,
+    `CODEX_HOME`, `XDG_CONFIG_HOME` + `XDG_DATA_HOME` for gemini.
+    Adapters resolve the exact env-var name during their own
+    implementation phase and capture the finding in JOURNAL. OAuth
+    credentials remain in the user's global state and are inherited
+    via process env; only the state/cache/session dirs are
+    redirected. On FreelOAder restart, all `<data_dir>/cli-state/`
+    subdirs are torn down — matches "no session persistence across
+    restarts" (§ Things to not do) and removes orphaned CLI threads.
+    For CLIs without an isolation env-var, fallback is a
+    per-provider mutex (turns on that provider serialize globally),
+    caught at adapter-implementation time.
 
 ### Still open — need per-CLI investigation
 

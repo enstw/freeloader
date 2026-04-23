@@ -103,8 +103,13 @@ gemini's compound-provider quirk lands on top.
   resumes via its session id on subsequent turns.
 - Gemini's per-model stats (`stats.models`) are captured in the journal as
   a compound-provider event.
-- Codex `--ephemeral` mode is used; claude sessions are cleaned up on
-  shutdown if feasible.
+- Codex uses `exec resume <thread_id>` for turn continuation —
+  `--ephemeral` is NOT used (it prevents resume). CLI-side state
+  cleanup is automatic: each conversation runs in an isolated state
+  dir at `<data_dir>/cli-state/<conversation_id>/` (PLAN decision
+  #16), and all per-conversation state dirs are torn down on
+  FreelOAder restart, which preserves the "no session persistence
+  across restarts" rule without needing per-CLI cleanup subcommands.
 
 **Gate.** `scripts/gate_3.sh`
 
