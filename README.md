@@ -76,8 +76,9 @@ the next phase begins. See `ROADMAP.md` for the gates.
 - FastAPI frontend
 - `uv` for dependency management
 - `src/freeloader/` layout, `pyproject.toml`
-- Backends: `claude` (Claude Code), `gemini`, `codex` — all invoked as
-  subprocesses per turn, no persistent processes
+- Backends: `claude` (Claude Code), `codex`, `gemini` — all invoked as
+  subprocesses per turn, no persistent processes. Implementation order
+  is claude → codex → gemini (see `ROADMAP.md` phase 3).
 
 ## Non-goals
 

@@ -625,11 +625,15 @@ CLI per turn — no persistent processes.)*
 1. **Add streaming.** Map JSONL events to OpenAI SSE deltas live (tiny
    field-mapper — no stream parsing). Also wire cancellation: client
    disconnect → `SIGTERM` the subprocess → mark turn cancelled.
-1. **Add `GeminiAdapter` + `CodexAdapter`, dumb round-robin routing.** Flushes
-   out the `CLIAdapter` Protocol boundaries, the vendor-specific session-id
-   shapes, and the provider-switch replay path (principle #3). Each adapter
-   is ~one file: shell-out command builder + JSONL event mapper + session-id
-   extractor.
+1. **Add `CodexAdapter` + `GeminiAdapter`, dumb round-robin routing.**
+   Implementation order is codex-then-gemini: codex is structurally
+   closer to claude (clean JSONL stream, server-assigned thread_id),
+   gemini is the compound-provider outlier. Doing codex second flushes
+   out the `CLIAdapter` Protocol boundaries, the vendor-specific
+   session-id shapes, and the provider-switch replay path (principle
+   #3) before gemini's `stats.models` quirk lands. Each adapter is
+   ~one file: shell-out command builder + JSONL event mapper +
+   session-id extractor.
 1. **Add quota tracking + threshold switching.** Ingest claude's
    `rate_limit_event` records directly; infer quota pressure for gemini /
    codex from per-turn token usage + 429 detection. Router reads a derived

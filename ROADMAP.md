@@ -65,12 +65,21 @@ leak a CLI subprocess.
 
 ---
 
-## Phase 3 — GeminiAdapter + CodexAdapter + round-robin routing
+## Phase 3 — CodexAdapter + GeminiAdapter + round-robin routing
 
 **Purpose.** Flush out the `CLIAdapter` Protocol boundaries and the
 provider-switch replay path. The three vendors have different session-id
-shapes (claude: client UUID; gemini: server index; codex: server
-thread_id) — if the seam is wrong, this is where it shows.
+shapes (claude: client UUID; codex: server thread_id; gemini: server
+index) — if the seam is wrong, this is where it shows.
+
+**Implementation order: codex first, then gemini.** Codex is
+structurally closer to claude (clean JSONL event stream,
+single-session-per-invocation, server-assigned thread_id is a string
+like claude's UUID). Gemini is the outlier — compound provider with
+per-sub-model stats, server-assigned integer index, ambiguous
+system-prompt injection. Building codex as the second adapter exposes
+what pluralizing the Protocol requires on a low-variance shape before
+gemini's compound-provider quirk lands on top.
 
 **Exit criteria.**
 - The same contract test suite (phase 1 golden-style) runs green against
