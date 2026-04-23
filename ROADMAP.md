@@ -25,8 +25,14 @@ the per-turn log (principle #7).
 - Two turns in the same conversation carry context (turn 2 references turn 1).
 - Second turn uses `-r <uuid>` to resume the backend session.
 - Client-sent `tools=[...]` is stripped with a logged warning.
-- Scratch cwd is created per turn under the configured data dir; backend
-  cannot read project files.
+- Scratch cwd is created per turn under the configured data dir; the
+  CLI is invoked with `--add-dir <scratch>` (or `-C <scratch>` as the
+  codex/gemini equivalents) so its *intended* file surface is the
+  scratch dir. This is defense-in-depth, not a hard boundary: the CLI
+  binary can still read `~`, user config, or credentials if its native
+  tools ask for it. OS-level isolation (sandbox-exec on macOS,
+  container on Linux) is explicitly NOT part of MVP; revisit at phase
+  3+ if the threat model demands it.
 - Golden JSONL fixture replay test for `ClaudeAdapter` exists and is green.
 - `src/freeloader/canonical/history_diff.py` exists with a
   `diff_against_stored(conversation, incoming_messages) -> new_turn_messages`
@@ -34,8 +40,10 @@ the per-turn log (principle #7).
   (b) client regeneration replacing the last assistant turn,
   (c) mismatch (raise) when stored history diverges from the prefix of
   `incoming_messages`.
-- `JOURNAL.jsonl` contains a per-turn record with `{conversation_id,
-  backend_session_id, provider, outcome, usage}`.
+- `<data_dir>/events.jsonl` contains a per-turn `turn_done` record
+  with `{conversation_id, backend_session_id, provider, outcome,
+  usage}`. Repo-root `JOURNAL.jsonl` remains build-time only (see
+  PLAN.md decision #6).
 
 **Gate.** `scripts/gate_1.sh`
 
@@ -57,8 +65,11 @@ leak a CLI subprocess.
   preserved if the backend already reported one.
 - No zombie `claude` processes after a disconnect stress test (50 drops).
 - Turn state machine has explicit states
-  `queued/spawning/streaming/drained/logged/cancelled/backend_error/
+  `queued/spawning/streaming/complete/cancelled/backend_error/
   rate_limited/timed_out` and unit tests for each transition.
+  (`complete` replaces the earlier `drained + logged` pair — journal
+  write is atomic with reaching the terminal state; see PLAN.md
+  principle #2.)
 - 5-minute hard timeout is enforced.
 
 **Gate.** `scripts/gate_2.sh`

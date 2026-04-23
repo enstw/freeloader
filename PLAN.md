@@ -32,7 +32,7 @@ continue.dev, raw curl — just points `base_url` at FreelOAder and it works.
 |---|---|---|
 | State model | **Stateless** — client sends full message history every turn | **Stateful** — server holds conversation; client sends `previous_response_id` + new input |
 | Provider switching | Easy — full history available for replay into any backend | Requires FreelOAder to replay from its conversation log |
-| CLI mapping | Extra work: diff the incoming history against the resumed session to avoid reprocessing | Natural 1:1: `previous_response_id` maps to backend session id, shell out with resume flag |
+| CLI mapping | Extra work: diff incoming history against the stored conversation (identity = hash-of-prefix + optional header, see decision #14) | `previous_response_id` resolves to a FreelOAder-owned turn record carrying the backend session id (see decision #15) |
 | Client compatibility | Broad — most tools use this today | Growing — newer OpenAI SDKs, Codex, agents framework |
 
 Both surfaces feed into the same pipeline: canonicalize → route → dispatch
@@ -65,9 +65,12 @@ request is parsed and how the response is wrapped.
 
 - **Chat Completions** is the lingua franca today — most tools use it.
 - **Responses API** is a more natural fit for CLI backends, which are
-  inherently session-based. The `previous_response_id` → backend session id
-  mapping avoids replaying the full history on every turn, saving the 6k–14k
-  token cold-cache tax.
+  inherently session-based. The `previous_response_id` →
+  `(conversation, turn, backend_session_id at that turn)` mapping
+  avoids replaying full history on every turn, saving the 6k–14k token
+  cold-cache tax. FreelOAder owns the `response_id` namespace; backend
+  session ids never leak into OpenAI-facing surfaces (see decision
+  #15).
 - Clients are migrating: OpenAI's own Codex CLI and agents SDK use the
   Responses API. Supporting both means FreelOAder stays compatible as the
   ecosystem shifts.
@@ -90,15 +93,22 @@ request is parsed and how the response is wrapped.
 1. Translate OpenAI requests into CLI stdin prompts; translate CLI stdout
    back into OpenAI SSE deltas (chat completions) or Responses API events.
 1. Maintain `{conversation_id → (provider, backend_session_id)}` bindings.
-   For the Responses API, map `previous_response_id` directly to the
-   backend session id. For chat completions, diff incoming history against
-   the stored conversation to extract the new turn.
+   For chat completions, derive the `conversation_id` from a hash of
+   the message prefix (or the `X-FreelOAder-Conversation-Id` header if
+   present, see decision #14), then diff incoming history against the
+   stored conversation to extract the new turn. For the Responses API,
+   generate a FreelOAder-owned `response_id` per turn that resolves
+   internally to `(conversation_id, turn_id, backend_session_id)` —
+   backend identity never appears in client-facing fields (see
+   decision #15).
 1. Track per-subscription quota in real time; switch providers on
    threshold breach; schedule workload across the billing cycle.
 
 **CLI backends (existing, unchanged):**
-- `claude` (Claude Code), `codex`, `gemini` — each runs as a persistent
-  authorized subprocess with stdin/stdout bridged to FreelOAder.
+- `claude` (Claude Code), `codex`, `gemini` — invoked as a fresh
+  non-interactive subprocess per turn (`claude -p`, `codex exec`,
+  `gemini -p` — see capability matrix below). No persistent process
+  per session; each turn reads JSONL on stdout and exits.
 
 **Clients (existing, unchanged):**
 - Hermes Agent provides memory, skills, user modeling, and the agent loop.
@@ -272,27 +282,43 @@ class CLIAdapter(Protocol):
 `Delta` is a tagged union, not a flat "chunk" record:
 
 ```python
-Delta = TextDelta | SessionIdDelta | UsageDelta | RateLimitDelta
+Delta = (
+    TextDelta        # streamed assistant content
+    | FinishDelta    # finish_reason: stop/length/content_filter/tool_calls
+    | SessionIdDelta # backend-assigned session id (first time per conv)
+    | UsageDelta     # per-turn token usage (claude / gemini / codex)
+    | RateLimitDelta # vendor rate-limit event (explicit from claude)
+    | ErrorDelta     # adapter-observed error (bad JSONL, partial stream)
+    | RawDelta       # escape hatch: vendor event we haven't canonicalized
+)
 ```
 
-Each variant carries exactly one kind of information: a text chunk for
-streaming, a backend-assigned session id for persistence, per-turn token
-usage, or a vendor rate-limit event. The frontend pattern-matches on the
-variant rather than parsing positionally. This matters because every
-adapter interleaves these on a single stream (claude emits
-`rate_limit_event` and `result` records alongside `assistant` messages)
-and the frontend has to dispatch them to different destinations — text
-to SSE, session id to the conversation record, usage and rate-limit to
-the quota event log. A flat `Delta` with "the last one has the session
-id" semantics was the original shape and is wrong; variants must be
+Each variant carries exactly one kind of information. The frontend
+pattern-matches on the variant rather than parsing positionally. This
+matters because every adapter interleaves these on a single stream
+(claude emits `rate_limit_event` and `result` records alongside
+`assistant` messages) and the frontend has to dispatch them to
+different destinations — text to SSE, finish reason to the OpenAI
+response object, session id to the conversation record, usage and
+rate-limit to the runtime event log, errors to both client and
+journal. A flat `Delta` with "the last one has the session id"
+semantics was the original shape and is wrong; variants must be
 distinguishable at every yield.
+
+`RawDelta` is the escape hatch for vendor events the canonical layer
+doesn't recognize yet. They're written to the runtime event log for
+debugging but don't reach the client. Adding a new canonical variant
+is a deliberate decision, not an accident of whatever the vendor just
+shipped.
 
 `send()` shells out to the backend CLI for one turn, yields
 appropriately-typed deltas parsed from the CLI's JSONL stream, and
-returns when the subprocess exits. The adapter yields exactly one
-`SessionIdDelta` the first time a backend assigns a session id for a new
-conversation, at least one `UsageDelta` on a successful turn, and any
-number of `RateLimitDelta` events the vendor emits.
+returns when the subprocess exits. On a successful turn the adapter
+yields: exactly one `SessionIdDelta` the first time a backend assigns
+a session id for a new conversation, zero-or-more `TextDelta`, any
+number of `RateLimitDelta` / `RawDelta` interleaved, one `FinishDelta`
+immediately before a terminal `UsageDelta`. An `ErrorDelta` terminates
+the stream in place of the normal `FinishDelta` + `UsageDelta` pair.
 
 The `system` parameter carries the client's system message (if any) so
 each adapter can decide how to inject it — the slot has to live on the
@@ -518,18 +544,23 @@ decisions, not research — change them deliberately, not by drift.
    otherwise the conversation stays unbound until the next turn starts
    fresh.
 
-1. **Two logs, one format — both append-only JSONL.**
-   - `JOURNAL.jsonl` (global, repo root): one line per event —
-     build-time (`decision`, `lesson`, `step_*`, `phase_*`), runtime
-     per-turn (`turn_done` with `{conversation_id, backend_session_id,
-     provider, outcome, usage}`), and quota signals (`rate_limit_event`,
-     `spawn_error`). Router reads a derived view over this file
-     (principle #5); scanning per-conversation files per routing
-     decision doesn't scale and isn't where quota events live.
-   - `<data_dir>/<conversation_id>.jsonl` (per conversation): one line
-     per canonical message (user/assistant turn + metadata). Used for
-     replay when rebinding to a new backend (principle #3). Not read by
-     the router.
+1. **Three logs, one format — all append-only JSONL.** Different
+   lifecycle, different storage, different audience.
+   - `JOURNAL.jsonl` (repo root, tracked in git) — **build-time
+     only**: `decision`, `lesson`, `surprise`, `step_*`, `phase_*`.
+     Written by `scripts/reflect.sh`; never touched by the running
+     server. Gate scripts verify this file is append-only vs HEAD~1.
+   - `<data_dir>/events.jsonl` (runtime, not tracked) — runtime
+     events: `turn_done` (`{conversation_id, backend_session_id,
+     provider, outcome, usage}`), `rate_limit_event`, `spawn_error`,
+     `quota_signal`. Router reads a derived view over this file
+     (principle #5). Lives under `data_dir` so running the server
+     doesn't dirty the repo and conversation metadata can't leak into
+     git commits.
+   - `<data_dir>/conversations/<conversation_id>.jsonl` — one line per
+     canonical message (user/assistant turn + metadata). Used for
+     replay when rebinding to a new backend (principle #3). Not read
+     by the router.
 
    Crash-safe, human-readable, no SQLite, no migrations. Concurrent
    writers within the server share a single-writer asyncio lock per
@@ -545,10 +576,19 @@ decisions, not research — change them deliberately, not by drift.
 
 1. **Turn timeout and retry policy.** Turns hard-timeout at 5 minutes
    (kill the subprocess, mark `timed_out`). Transient backend errors
-   (non-zero exit without a `result` event, spawn failures) retry once
-   against the same backend; after that the router marks the adapter
-   `unhealthy` and either switches backends or returns `503`. There are
-   no idle sessions to close — each turn is ephemeral.
+   (non-zero exit without a `result` event, spawn failures) retry at
+   most once — BUT only if the failed attempt emitted no
+   `SessionIdDelta` and no `TextDelta`. Once the backend has assigned
+   a session id or produced partial output, the CLI has mutated state
+   (created a remote session, performed native agent work, consumed
+   quota); retrying with `-r <id>` against the same session would fork
+   or duplicate turns. Post-observation retries must start a fresh
+   backend session (no `-r`) and flag the prior attempt `ambiguous` in
+   the runtime event log; the router treats `ambiguous` as stronger
+   evidence of adapter unhealth than a clean failure. After one retry,
+   router marks the adapter `unhealthy` and either switches backends
+   or returns `503`. There are no idle sessions to close — each turn
+   is ephemeral.
 
 1. **Error taxonomy → OpenAI error shapes.** `400` bad request / unknown
    model, `401` missing/invalid API key, `429` pool exhausted or
@@ -575,16 +615,50 @@ decisions, not research — change them deliberately, not by drift.
     example OpenAI-compatible proxy uses, so clients debugging against
     FreelOAder see familiar error shapes.
 
-1. **Runtime logging: stdlib `logging`; events: `JOURNAL.jsonl`.** Two
-    audiences, two destinations. stdlib `logging` (default `WARNING`,
-    `INFO` with `FREELOADER_LOG_LEVEL=info`) for server-runtime
-    diagnostics: port binding, adapter spawn failures, unhandled
-    exceptions, request IDs for correlating stacktraces. `JOURNAL.jsonl`
-    for the architectural event stream: per-turn records, quota signals,
-    decisions/lessons/phase transitions. Operator-visible logs and
-    routing-relevant events have different retention, volume, and
-    consumers. No `structlog`, no `loguru` — stdlib can emit JSON via a
-    formatter if needed.
+1. **Runtime logging: stdlib `logging`; events: the three logs of
+    decision #6.** Two audiences, two destinations. stdlib `logging`
+    (default `WARNING`, `INFO` with `FREELOADER_LOG_LEVEL=info`) for
+    server-runtime diagnostics: port binding, adapter spawn failures,
+    unhandled exceptions, request IDs for correlating stacktraces.
+    The three append-only JSONL logs (repo `JOURNAL.jsonl` for
+    build-time, `<data_dir>/events.jsonl` for runtime events,
+    per-conversation files for messages) carry the architectural
+    event stream. Operator-visible diagnostics and
+    routing/architectural events have different retention, volume,
+    and consumers. No `structlog`, no `loguru` — stdlib can emit JSON
+    via a formatter if needed.
+
+1. **Chat Completions conversation identity: hash-of-prefix +
+    optional client header.** `/v1/chat/completions` is stateless;
+    OpenAI has no `conversation_id` concept. FreelOAder computes a
+    conversation key from a stable fingerprint of the message prefix:
+    preceding system messages + the first user message, SHA-256'd.
+    Well-behaved clients that resend the same history produce the
+    same key — turn N of a conversation matches turn N-1 from the
+    same client. Clients that want explicit control send
+    `X-FreelOAder-Conversation-Id: <opaque>`; when present, the header
+    wins over the hash. Prefix-hash failure modes (mid-conversation
+    system-prompt edits, regeneration of turn 1) surface as
+    "conversation not found, start fresh" — no fuzzy matching, no
+    LRU recovery; any divergence means a new conversation. Simplest
+    thing that works for the 90% case (chat clients that resend
+    history unchanged); clean fallback for the 10% (power users that
+    want stable ids). Revisit only if real clients demand more.
+
+1. **Responses API: FreelOAder-owned response IDs, internal mapping.**
+    Each `/v1/responses` response gets an opaque
+    FreelOAder-generated `response_id` (e.g., `fr_resp_<uuid>`).
+    Internally, the response_id maps to `(conversation_id, turn_id,
+    backend_session_id at that turn)`. Clients that send
+    `previous_response_id` resolve to the conversation + turn +
+    backend binding at *that specific point in history* — the mapping
+    survives provider switches (the old response_id still resolves
+    correctly even after the conversation has moved to a new
+    backend). Backend session ids never appear in any OpenAI-facing
+    field; they live only in the per-conversation log and the
+    internal mapping table. This is the answer to codex's P1 critique
+    that "`previous_response_id` → backend session id directly"
+    leaked backend identity into the API shape.
 
 ### Still open — need per-CLI investigation
 

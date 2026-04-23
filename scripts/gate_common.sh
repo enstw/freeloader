@@ -54,10 +54,12 @@ gate_common_invariants() {
   fi
 
   # Python hygiene — only enforced once pyproject.toml exists.
+  # All project tooling is invoked via `uv run` so the gate matches
+  # the repo-wide uv-first rule (no global pip/pipx dependency).
   if [[ -f pyproject.toml ]]; then
-    gate_check "ruff check clean" ruff check src tests
-    gate_check "ruff format clean" ruff format --check src tests
-    gate_check "pytest green" pytest -q
+    gate_check "ruff check clean" uv run ruff check src tests
+    gate_check "ruff format clean" uv run ruff format --check src tests
+    gate_check "pytest green" uv run pytest -q
     gate_check "src/freeloader/ package root exists" test -d src/freeloader
   else
     _gate_note "skip" "python checks (no pyproject.toml yet)"
