@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from freeloader.canonical.deltas import (
     Delta,
@@ -26,6 +29,7 @@ from freeloader.canonical.deltas import (
     TextDelta,
     UsageDelta,
 )
+from freeloader.config import resolve_data_dir
 
 # claude result.subtype → OpenAI finish_reason. Spike observed "success" and
 # (rarely) "error_max_turns" / "error_during_execution". Anything unknown
@@ -171,8 +175,19 @@ class ClaudeAdapter:
     """Thin wrapper over `claude -p`. One subprocess per turn; no persistent
     process. Subprocess path is exercised end-to-end at step 1.7."""
 
-    def __init__(self, executable: str = "claude") -> None:
+    def __init__(
+        self,
+        executable: str = "claude",
+        data_dir: Path | None = None,
+    ) -> None:
         self.executable = executable
+        self.data_dir = Path(data_dir) if data_dir else resolve_data_dir()
+
+    def _scratch_for(self, session_id: str) -> Path:
+        # Short turn_id suffix so two in-flight turns on the same
+        # conversation (regenerate while retry is in-flight) don't collide.
+        turn_id = uuid.uuid4().hex[:8]
+        return self.data_dir / "scratch" / session_id / turn_id
 
     async def send(
         self,
@@ -181,6 +196,8 @@ class ClaudeAdapter:
         session_id: str,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[Delta]:
+        scratch = self._scratch_for(session_id)
+        scratch.mkdir(parents=True, exist_ok=True)
         argv = [
             self.executable,
             "-p",
@@ -189,28 +206,35 @@ class ClaudeAdapter:
             "--verbose",
             "--session-id",
             session_id,
+            "--add-dir",
+            str(scratch),
         ]
         if resume_session_id:
             argv += ["-r", resume_session_id]
         argv.append(prompt)
 
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        assert proc.stdout is not None
+        proc = None
         try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(scratch),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            assert proc.stdout is not None
             async for delta in parse_stream(_stream_lines(proc.stdout)):
                 yield delta
         finally:
             # Best-effort teardown so an aborted caller doesn't leak zombies
             # in local dev. Proper cancellation / SIGKILL-after-3s is phase 2.
-            if proc.returncode is None:
+            if proc is not None and proc.returncode is None:
                 proc.terminate()
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=3.0)
                 except TimeoutError:
                     proc.kill()
                     await proc.wait()
+            # Per-turn scratch: remove the directory after the turn ends
+            # (ROADMAP phase 1 specifies per-turn, not per-session).
+            shutil.rmtree(scratch, ignore_errors=True)
