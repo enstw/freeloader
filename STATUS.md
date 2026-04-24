@@ -1,82 +1,66 @@
 # FreelOAder status — 2026-04-24
 
 ## Phase: 1/5 — ClaudeAdapter, non-streaming, single conversation
-## Step: 1.3 — FastAPI frontend: /v1/chat/completions (non-streaming) + minimal router  ✅ complete
-## Task: advance to step 1.4 — history_diff. Implement
-         diff_against_stored(conversation, incoming_messages) with the
-         three MVP cases (append-only / regenerate-last / mismatch),
-         define CanonicalMessage, and reconcile adapter/router
-         signatures with PLAN principle #1.
+## Step: 1.4 — history_diff + CanonicalMessage  ✅ complete
+## Task: advance to step 1.5 — sandbox. Spawn ClaudeAdapter subprocess
+         inside a scratch cwd under data_dir; invoke with
+         `--add-dir <scratch>`. Flips gate_1 sandbox test line green.
 
 Purpose (why this step existed):
-  Made PLAN decision #12 (FastAPI) and principle #6 (dumb frontend)
-  executable. Wired the architectural seam
-  "frontend → router → adapter" via Router injection so the fake
-  adapter pattern works in tests. Single-call /v1/chat/completions
-  round-trips Delta → ChatCompletion. Live claude still not exercised
-  — that's 1.7.
+  Materialized PLAN principle #4 as code: the history-diff contract
+  between the stateless /v1/chat/completions surface and the internal
+  canonical model. CanonicalMessage lands as a minimal BaseModel
+  (role + content + metadata). Library-only — wiring into the frontend
+  handler happens at 1.7 alongside conversation identity (decision #14).
 
 Entry criteria (met):
-  - [x] Step 1.2 shipped (HEAD=713779b)
-  - [x] ClaudeAdapter.send + Delta union live
-  - [x] Golden test covers JSONL→Delta for all 7 variants
+  - [x] Step 1.3 shipped (HEAD=ae3aae5)
+  - [x] Frontend → Router → Adapter seam works via TestClient
+  - [x] 13/13 tests green pre-1.4
 
 Exit criteria (met):
-  - [x] pyproject.toml adds `fastapi>=0.115` runtime + `httpx>=0.27`
-        dev; uv.lock regenerated (10 new packages: fastapi, starlette,
-        anyio, httpx, httpcore, h11, certifi, idna, annotated-doc,
-        plus h11 transitive)
-  - [x] adapters/claude.py exports flatten_messages() producing
-        role-tagged plaintext ([ROLE]\n<text>\n[/ROLE])
-  - [x] src/freeloader/router.py: Router.dispatch(messages, *,
-        session_id=None, resume_session_id=None) → AsyncIterator[Delta]
-  - [x] src/freeloader/frontend/app.py: create_app(router=None) +
-        POST /v1/chat/completions handler (~50 lines per principle #6)
-  - [x] tests/frontend/__init__.py + test_chat_completions_
-        nonstreaming.py — 4 tests green:
-          • happy path: OpenAI ChatCompletion shape + flattened prompt
-          • stream=true → 400
-          • error FinishDelta → "error" finish_reason + zero usage
-          • unknown request fields (tools/temperature) accepted
-  - [x] app.py imports only from freeloader.router (cross-phase
-        invariant honored by convention)
+  - [x] src/freeloader/canonical/messages.py — CanonicalMessage
+        (role, content, metadata); frozen BaseModel
+  - [x] src/freeloader/canonical/history_diff.py — real impl:
+        HistoryMismatchError + DiffResult{action, new_messages} +
+        diff_against_stored(stored, incoming) covering 3 MVP cases
+  - [x] tests/canonical/__init__.py + test_history_diff.py — 10 tests:
+          append: first turn, new user after assistant, system prefix
+                  preserved, equal-to-stored no-op
+          regenerate: drop assistant no new turn, drop assistant +
+                  new user
+          mismatch: mid-history edit, incoming-shorter-and-last-is-user,
+                  reordered system message
   - [x] `uv run ruff check src tests`          exits 0
   - [x] `uv run ruff format --check src tests` exits 0
-  - [x] `uv run pytest -q`                     13/13 green
-  - [x] scripts/gate_1.sh common invariants + phase-1 checks stay
-        green; 6/10 phase-specific green (unchanged — 1.3 adds
-        infrastructure, not a new gated behavior test)
+  - [x] `uv run pytest -q`                     22/22 green
+  - [x] scripts/gate_1.sh "history_diff unit test exists" flipped
+        to [ok]  (7 of 10 phase-specific green after 1.4)
   - [x] JOURNAL.jsonl: step_start + 3 decisions + step_done
 
-Scope — things 1.3 deliberately did NOT do:
-  - No streaming. Phase 2. Handler rejects stream=true with 400.
-  - No tools=[...] stripping. 1.6. extra="allow" lets clients send
-    tools/temperature without 422; silently ignored.
-  - No history_diff. 1.4. Each turn flattens the full messages array.
-  - No conversation identity / session persistence. Fresh UUID per
-    request; 2-turn resume at 1.7.
-  - No auth (decision #2). Phase 2+.
-  - No uvicorn / server entry point. TestClient only; live-server
-    lands at 1.7 e2e.
-  - No sandbox (--add-dir). 1.5.
-  - No cancellation plumbing. Phase 2.
+Scope — things 1.4 deliberately did NOT do:
+  - No adapter/router/frontend signature migration to
+    list[CanonicalMessage]. Deferred to 1.7 (e2e) — no live caller
+    of the new shape exists yet. Captured as JOURNAL decision.
+  - No mid-history edit (case 4). HistoryMismatchError surfaces 400
+    at 1.7; revisit in phase 5 if a real client needs it.
+  - No multimodal content_blocks, no tool_calls on CanonicalMessage.
+    Minimal shape per MVP scope.
+  - No conversation persistence (1.7).
+  - No conversation identity / hash-of-prefix (decision #14, 1.7).
 
-Next step: 1.4 — history_diff.
-  - src/freeloader/canonical/history_diff.py (stub → real):
-    diff_against_stored(conversation, incoming_messages) returning
-    new_turn_messages. Three MVP cases per principle #4:
-    (a) append-only new turn, (b) client regeneration replacing the
-    last assistant turn, (c) mismatch when stored prefix diverges →
-    raise.
-  - src/freeloader/canonical/ grows a CanonicalMessage type
-    (role, content_blocks?, tool_calls?, metadata?). Minimal shape
-    for 1.4: role + text content.
-  - Router+Adapter signatures reconcile with PLAN principle #1:
-    send/dispatch now take canonical messages, not raw dicts.
-    flatten_messages moves to accepting list[CanonicalMessage].
-  - tests/canonical/test_history_diff.py covers the three cases.
-  - Flips "history_diff unit test exists" in gate_1 → green
-    (7/10 phase checks green after 1.4).
+Next step: 1.5 — sandbox.
+  - Resolve data_dir: FREELOADER_DATA_DIR env, default
+    $XDG_DATA_HOME/freeloader → fallback ~/.local/share/freeloader.
+  - ClaudeAdapter.send() creates a scratch cwd under
+    <data_dir>/scratch/<session_id>/ and spawns with
+    `--add-dir <scratch>` and `cwd=<scratch>`. The scratch dir is
+    cleaned up in the finally block.
+  - tests/adapters/test_claude_sandbox.py — monkeypatches
+    asyncio.create_subprocess_exec so no live claude runs; asserts
+    argv contains `--add-dir <scratch>`, cwd==scratch, and scratch
+    exists during the call.
+  - Flips "scratch cwd sandbox test" in gate_1 → green (8/10).
 
 Blockers: none.
 
