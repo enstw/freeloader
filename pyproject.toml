@@ -6,7 +6,9 @@ requires-python = ">=3.11"
 readme = "README.md"
 authors = [{ name = "Jay Zhuang" }]
 license = { text = "Unlicense" }
-dependencies = []
+dependencies = [
+    "pydantic>=2.9",
+]
 
 [project.urls]
 Source = "https://github.com/enstw/freeloader"
