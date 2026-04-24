@@ -87,20 +87,6 @@ def test_happy_path_returns_openai_chatcompletion_shape():
     assert adapter.calls[0]["session_id"]  # fresh UUID generated
 
 
-def test_stream_true_returns_400():
-    client, _ = _client([])
-    res = client.post(
-        "/v1/chat/completions",
-        json={
-            "model": "freeloader/claude",
-            "messages": [{"role": "user", "content": "hi"}],
-            "stream": True,
-        },
-    )
-    assert res.status_code == 400
-    assert "stream" in res.json()["detail"].lower()
-
-
 def test_error_finish_reason_propagates():
     deltas: list[Delta] = [
         TextDelta(text="partial"),

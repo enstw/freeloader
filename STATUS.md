@@ -1,61 +1,74 @@
 # FreelOAder status — 2026-04-24
 
-## Phase: 1/5 — ClaudeAdapter, non-streaming, single conversation  ✅ GATE GREEN
-## Next phase: 2/5 — streaming + cancellation
-## Step: 2.1 — SSE streaming for /v1/chat/completions
-## Task: make `stream=true` work. Stream Delta events as OpenAI-
-         shaped SSE chunks live (TextDelta → delta.content chunk;
-         FinishDelta → finish_reason on final chunk; UsageDelta in
-         the final chunk when `stream_options.include_usage=true`).
+## Phase: 2/5 — streaming + cancellation
+## Step: 2.2 — turn state machine
+## Task: introduce src/freeloader/core/turn_state.py carrying the
+         explicit enum `queued/spawning/streaming/complete/cancelled/
+         backend_error/rate_limited/timed_out` plus the transition
+         table. Reaching any terminal state atomically writes a
+         runtime event (PLAN principle #2 — no separate "logged"
+         state). Router.dispatch becomes the machine's driver: it
+         owns the per-conversation mutex (decision #1) and records
+         the state transitions observed from the Delta stream.
 
 Purpose (why this step exists):
-  Phase 1 closed with non-streaming only. Real clients (Cursor,
-  aider, Hermes, OpenAI SDK) default to streaming; a non-streaming
-  proxy is usable but not comfortable. Phase 2 adds SSE so the
-  user sees tokens as claude produces them, and builds the
-  cancellation plumbing that makes client-disconnect → SIGTERM
-  work (PLAN decision #5).
+  Step 2.1 shipped SSE streaming; clients now see tokens live. The
+  hard problem in phase 2 is lifecycle, not parsing — a dropped
+  client must not leak a CLI subprocess, a timed-out turn must not
+  pretend to still be streaming, a rate_limit_event must not race
+  with a router retry. The state machine gives the remaining phase-2
+  steps (2.3 disconnect, 2.4 timeout, 2.5 byte-diff contract) one
+  place to reason about those transitions instead of scattering
+  boolean flags across app.py / router.py / adapter.
 
-Phase 1 recap (closed, 10/10 gate checks green):
-  - Step 1.1 scaffold ✅  (pyproject + src skeleton)
-  - Step 1.2 ClaudeAdapter + Delta union + golden replay ✅
-  - Step 1.3 FastAPI frontend + router + flatten_messages ✅
-  - Step 1.4 history_diff + CanonicalMessage ✅
-  - Step 1.5 scratch cwd sandbox ✅
-  - Step 1.6 tools-strip chat-only mitigation ✅
-  - Step 1.7 e2e two-turn (hash-of-prefix identity + storage +
-    events.jsonl + resume) ✅
+Step 2.1 recap (closed):
+  - src/freeloader/frontend/sse.py — OpenAI chat.completion.chunk
+    formatters (role / text / finish / usage + sse_encode +
+    DONE_SENTINEL).
+  - frontend/app.py branches on req.stream: stream=true returns a
+    StreamingResponse whose generator consumes router.dispatch and
+    emits role → N×text → finish → (usage) → [DONE].
+  - stream_options.include_usage gates the usage chunk.
+  - Conversation persistence happens inside the generator after the
+    router's async-for drains, preserving the non-streaming path's
+    append/rewrite semantics.
+  - X-FreelOAder-Conversation-Id is set on the streaming response
+    headers before any body bytes flow.
+  - 8 new tests in tests/frontend/test_streaming.py.
+  - 42/42 tests green; gate_1 still GREEN; gate_2 shows 2.1's
+    SSE-handler check flipped (1/6 phase-2 specific green).
 
-Phase 1 still-untested slice (deferred to Phase 2+ e2e):
-  - Live `claude -p` subprocess exercise. All phase-1 tests used
-    fake adapters or monkey-patched asyncio.create_subprocess_exec.
-    Phase 2 should include a smoke test that runs actual claude
-    once as a sanity check (gated behind an opt-in env flag so CI
-    stays offline). confirm_claude_model_usage_fields is a lesson
-    to revisit when that smoke test runs.
+Phase 2 remaining steps (sketched; refine at each step_start):
+  - Step 2.2 — turn state machine (this step).
+  - Step 2.3 — client-disconnect → SIGTERM → SIGKILL-after-3s;
+    the 50-drop stress test. PLAN decision #5 (discard
+    backend_session_id on cancellation).
+  - Step 2.4 — 5-minute hard timeout (PLAN decision #8).
+  - Step 2.5 — SSE byte-diff contract test vs an OpenAI reference
+    fixture. The "is our SSE shape actually compatible" check.
 
-Entry criteria (met):
-  - [x] Gate 1 GREEN; 35/35 tests passing
-  - [x] Phase 1 artifacts all shipped
-  - [x] phase_done entry logged in JOURNAL.jsonl with commit sha
-
-Exit criteria (for step 2.1):
-  - [ ] `/v1/chat/completions` with `stream=true` returns 200 and
-        a `text/event-stream` body
-  - [ ] Each TextDelta emits an OpenAI-shaped chunk:
-        `data: {"id":..., "object":"chat.completion.chunk", "model":
-        ..., "choices":[{"index":0,"delta":{"content":"..."},
-        "finish_reason":null}]}\n\n`
-  - [ ] FinishDelta emits the terminal chunk with finish_reason set
-        and an empty delta object
-  - [ ] Final `data: [DONE]\n\n` sentinel
-  - [ ] When `stream_options.include_usage=true`, append a usage
-        chunk before [DONE]
-  - [ ] Test: tests/frontend/test_streaming.py — TestClient reads
-        SSE, asserts ordered chunks, finish_reason, usage inclusion
-  - [ ] Existing non-streaming tests stay green
+Exit criteria (for step 2.2):
+  - [ ] src/freeloader/core/turn_state.py exists with a TurnState
+        enum covering all eight states and a pure `transition()`
+        function rejecting illegal edges.
+  - [ ] tests/core/test_turn_state.py exercises every legal
+        transition and at least one illegal one per state.
+  - [ ] Router.dispatch drives the machine: queued → spawning →
+        streaming → complete on the happy path; emits the correct
+        terminal event (turn_done / timed_out / rate_limited / …).
+  - [ ] A journal write failure surfaces as `backend_error`, not a
+        silent success.
+  - [ ] Existing tests (42) stay green; no behavior change visible
+        to the frontend on the happy path.
 
 Blockers: none.
+
+Phase 1 still-untested slice (carried forward):
+  - Live `claude -p` subprocess exercise. All phase-1 + 2.1 tests
+    used fake adapters or monkey-patched asyncio.create_subprocess_
+    exec. An opt-in live-claude smoke test should land somewhere in
+    phase 2 to verify confirm_claude_model_usage_fields against
+    real output.
 
 Recent lessons to keep in mind (see JOURNAL.jsonl for full text):
   - claude -p exits 0 even on rate_limit; inspect events, not exit code
