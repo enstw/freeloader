@@ -1,0 +1,52 @@
+[project]
+name = "freeloader"
+version = "0.0.0"
+description = "Local OpenAI-compatible API proxy that shells out to Claude / Codex / Gemini CLIs."
+requires-python = ">=3.11"
+readme = "README.md"
+authors = [{ name = "Jay Zhuang" }]
+license = { text = "Unlicense" }
+dependencies = []
+
+[project.urls]
+Source = "https://github.com/enstw/freeloader"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/freeloader"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Defensible baseline for a young codebase: pyflakes (F), pycodestyle (E,W),
+# isort (I), bugbear (B), pyupgrade (UP), simplify (SIM), comprehensions (C4).
+# No docstring rules — scope-creep guardrail per PLAN "no docstring-driven design."
+select = ["F", "E", "W", "I", "B", "UP", "SIM", "C4"]
+ignore = [
+    "E501",  # line length — ruff format handles; `# noqa` noise not worth it
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]  # assert False idiomatic in pytest
+
+[tool.ruff.format]
+# ruff format defaults are opinionated enough; keep them.
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra"
+asyncio_mode = "auto"

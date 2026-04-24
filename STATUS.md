@@ -1,95 +1,64 @@
-# FreelOAder status — 2026-04-23
+# FreelOAder status — 2026-04-24
 
 ## Phase: 1/5 — ClaudeAdapter, non-streaming, single conversation
-## Step: 1.0.5 — architecture review (pre-code)  ✅ complete (v3, post-gemini)
-## Task: advance to step 1.1 (scaffold pyproject.toml + src/freeloader/)
+## Step: 1.1 — scaffold pyproject.toml + src/freeloader/ + uv lock  ✅ complete
+## Task: advance to step 1.2 — ClaudeAdapter subprocess spawn + JSONL→Delta
+         mapping + golden fixture replay test.
 
-Purpose (why this step existed):
-  Pre-code architecture review across three independent passes:
-  Claude (eng-manager), OpenAI Codex (adversarial), and Gemini
-  (third-party domain expert on its own shape). Stress-test
-  decisions while revision is still an edit to PLAN.md, not a
-  refactor.
+Purpose (why this step exists):
+  Move from "no code" to "tooling works." Make gate_common's
+  python-hygiene branch executable (it currently skips because
+  there's no pyproject.toml). Create the empty module tree so
+  later steps (1.2 adapter, 1.3 frontend, 1.4 history_diff,
+  1.5 sandbox, 1.6 tools-strip, 1.7 e2e) drop into the right
+  slots without churning paths. Lock decisions #11 (3.11+, src
+  layout, uv) and #12 (FastAPI, deferred to 1.3) in writing —
+  not yet in imports.
 
 Entry criteria (met):
-  - [x] Step 1.0 scaffolding committed (8e01c36 … 17dd2dd)
-  - [x] PLAN.md, ROADMAP.md, AGENT.md stable and reviewable
-  - [x] No code in src/ yet — architectural decisions cheap to revise
+  - [x] Step 1.0.5 architecture review closed (HEAD=2b08eff)
+  - [x] gate_common.sh already routes ruff/pytest via `uv run`
+  - [x] .gitignore already excludes .venv/, __pycache__/, caches
+  - [x] No files under src/ to conflict with a fresh skeleton
 
 Exit criteria (met):
-  - [x] Round 1 — Claude eng-manager review: 13 findings
-  - [x] Round 2 — /codex consult adversarial: 10 findings
-  - [x] Round 3 — gemini CLI independent pass: 7 findings
-  - [x] Phase-3 adapter ordering locked: codex before gemini
-  - [x] All findings classified (PLAN/ROADMAP revision / decision /
-        lesson / deferred)
-  - [x] PLAN.md revisions committed across three rounds
-  - [x] ROADMAP.md updated to stay consistent with revised PLAN
-  - [x] scripts/gate_common.sh updated to use `uv run`
-  - [x] JOURNAL.jsonl contains 22 `decision` + 5 `lesson` entries
-        for step 1.0.5 across all three rounds
+  - [x] pyproject.toml exists, targets Python 3.11+, src layout,
+        package name `freeloader`
+  - [x] Ruff config: line-length 88, select F,E,W,I,B,UP,SIM,C4,
+        ignore E501
+  - [x] Pytest config: testpaths=tests, asyncio_mode=auto
+  - [x] src/freeloader/__init__.py               (version="0.0.0")
+  - [x] src/freeloader/adapters/__init__.py
+  - [x] src/freeloader/adapters/claude.py        (stub)
+  - [x] src/freeloader/frontend/__init__.py
+  - [x] src/freeloader/frontend/app.py           (stub)
+  - [x] src/freeloader/canonical/__init__.py
+  - [x] src/freeloader/canonical/history_diff.py (stub)
+  - [x] tests/__init__.py + tests/test_scaffold.py  (2 passes)
+  - [x] uv.lock committed
+  - [x] `uv run ruff check src tests`           exits 0
+  - [x] `uv run ruff format --check src tests`  exits 0
+  - [x] `uv run pytest -q`                      exits 0
+  - [x] JOURNAL.jsonl: step_start + 3 decisions + step_done for 1.1
 
-Summary round 1 (eng-manager + tooling): 13 findings → 7 PLAN
-revisions, 9 decisions, 2 deferred lessons.
+Scope — things 1.1 deliberately does NOT do:
+  - No FastAPI import yet; frontend/app.py is a stub. FastAPI
+    lands in step 1.3 when the route handler is actually written.
+  - No httpx, anyio, or other runtime deps until something imports
+    them. Deps-without-use is exactly the kind of premature
+    abstraction AGENT.md warns against.
+  - No subprocess wiring. claude.py is a stub; the shell-out lands
+    in 1.2 alongside the golden-fixture test.
+  - No Pydantic models for the Delta union. Schema lives in PLAN
+    principle #1; the code materializes in 1.2.
+  - Gate 1 will remain RED after 1.1 — the e2e / golden / sandbox
+    / tools-strip / history_diff unit tests don't exist yet.
+    That's expected. Step 1.1 greens the file-existence slice of
+    gate 1; the behavior slice greens across 1.2–1.7.
 
-Summary round 2 (/codex consult): 10 findings → 6 PLAN revisions,
-3 ROADMAP revisions, 1 script revision, 8 decisions, 1 lesson.
-
-Summary round 3 (gemini): 7 findings → 3 PLAN revisions (principle
-#3 replay format, principle #1 UsageDelta schema, decision #5
-cancellation), 1 new PLAN decision (#16 CLI state isolation),
-1 ROADMAP revision (codex --ephemeral removal), 5 decisions, 2
-lessons.
-
-Step 1.0.5 totals across all three rounds: 30 findings, 22
-decisions, 5 deferred lessons.
-
-Post-review correction (2026-04-23): decisions #14, #15, #16 —
-added in rounds 2 and 3 — demoted to *provisional* in PLAN.md.
-They solve problems that reviewers imagined rather than code
-that hit them; step 1.1 proceeds without needing them frozen.
-Recorded as a JOURNAL lesson on review-round scope creep.
-
-Key revisions landed (cumulative):
-  - principle #1 — Delta union (7 variants) + UsageDelta.models
-    sub-model schema; no health() in MVP
-  - principle #2 — `complete` terminal state, atomic journal write
-  - principle #3 — replay scope (client-visible turns only) +
-    replay format (role-tagged plaintext delimiters)
-  - principle #4 — history_diff MVP scope frozen at 3 cases
-  - decision #5 — cancellation DISCARDS backend_session_id
-  - decision #6 — three append-only logs (repo JOURNAL build-time;
-    data_dir events.jsonl runtime; per-conversation messages)
-  - decision #8 — retry only pre-observation; post-observation
-    starts fresh session
-  - decision #12 (new) — FastAPI
-  - decision #13 (new) — stdlib logging + three-log split
-  - decision #14 (new, **provisional**) — chat-completions conversation
-    identity = hash-of-prefix + header override
-  - decision #15 (new, **provisional**) — Responses API owns
-    response_id namespace
-  - decision #16 (new, **provisional**) — CLI state isolated per
-    conversation via env-var redirection (CLAUDE_CONFIG_DIR,
-    CODEX_HOME, XDG_*)
-  - phase-3 adapter order: codex → gemini
-  - ROADMAP phase 1 — filesystem sandbox weakened to
-    defense-in-depth; events move to <data_dir>/events.jsonl
-  - ROADMAP phase 2 — state names (complete vs drained/logged)
-  - ROADMAP phase 3 — codex uses exec resume, not --ephemeral
-  - scripts/gate_common.sh — ruff/pytest via `uv run`
-
-Deferred to later phases (recorded as lessons):
-  - journal_append_atomicity — single-writer asyncio lock in 3+
-  - rate_limit_stickiness — resetsAt scheduler in phase 4
-  - openai_field_passthrough — enumerate honored/ignored/rejected
-    request fields in phase 2
-  - events_jsonl_derived_view — router maintains in-memory view,
-    incremental updates; phase 4 concern
-  - codex_streaming_illusion — codex batch-at-end; phase 2
-    document-or-investigate concern
-
-Next step: 1.1 — pyproject.toml, src/freeloader/ skeleton, uv lock
-Blockers: none
+Next step: 1.2 — ClaudeAdapter subprocess spawn + JSONL→Delta
+         mapping + golden fixture replay test.
+Blockers: none.
 
 Recent lessons to keep in mind (see JOURNAL.jsonl for full text):
   - claude -p exits 0 even on rate_limit; inspect events, not exit code
@@ -97,6 +66,7 @@ Recent lessons to keep in mind (see JOURNAL.jsonl for full text):
   - agent-loop contamination is observable, not preventable, under OAuth
   - gemini is a compound provider (stats.models per turn)
   - Anthropic 3p-ban: shell-out to claude -p is the sanctioned path
+  - review-round scope creep: decisions #14/#15/#16 provisional
   - journal_append_atomicity (phase 3+ concern)
   - rate_limit_stickiness (phase 4 concern)
   - openai_field_passthrough (phase 2 concern)
