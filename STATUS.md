@@ -1,63 +1,75 @@
 # FreelOAder status — 2026-04-24
 
 ## Phase: 1/5 — ClaudeAdapter, non-streaming, single conversation
-## Step: 1.5 — scratch cwd sandbox  ✅ complete
-## Task: advance to step 1.6 — tools-strip. Frontend/router drops
-         `tools=[...]` / `tool_choice` from requests with a structured
-         log warning. Greens the gate_1 tools-strip test line.
+## Step: 1.6 — tools-strip (chat-only mitigation)  ✅ complete
+## Task: advance to step 1.7 — end-to-end two-turn. Last piece of
+         phase 1: conversation storage + hash-of-prefix identity +
+         history_diff wired into the handler; second turn passes
+         resume_session_id. Greens the final gate_1 line and closes
+         phase 1.
 
 Purpose (why this step existed):
-  Decision #3 became code: every claude subprocess gets an
-  ephemeral scratch cwd under data_dir and is invoked with
-  --add-dir <scratch>. Per-turn (per-send()) lifecycle; cleaned up
-  in finally. Defense-in-depth, not a hard boundary — OS-level
-  sandboxing is explicitly deferred past phase 1.
+  PLAN hard problem #1 has three options — chat-only, shim,
+  passthrough. Phase 1 shipped chat-only: tools and tool_choice
+  get dropped with a structured WARNING. System-prompt slot stays
+  under adapter control so the shim path remains viable at phase 5.
 
 Entry criteria (met):
-  - [x] Step 1.4 shipped (HEAD=3b5720d)
-  - [x] gate_1 at 7/10 phase-specific green pre-1.5
+  - [x] Step 1.5 shipped (HEAD=dd0ec0a)
+  - [x] 28/28 tests green; gate_1 8/10 phase-specific green
 
 Exit criteria (met):
-  - [x] src/freeloader/config.py exports resolve_data_dir() with
-        FREELOADER_DATA_DIR → XDG_DATA_HOME/freeloader →
-        ~/.local/share/freeloader
-  - [x] ClaudeAdapter.__init__ accepts data_dir + executable
-  - [x] ClaudeAdapter.send() creates data_dir/scratch/<sid>/<turn_id>/,
-        spawns with --add-dir + cwd, cleans up in finally
-  - [x] tests/adapters/test_claude_sandbox.py: 6 tests covering
-        argv construction, cwd existence at spawn time, per-turn
-        cleanup after send(), -r resume flag, session-id directory
-        layout, and all three data_dir resolution paths
+  - [x] ChatCompletionRequest gained tools + tool_choice as
+        recognized fields (still extra="allow" for temperature /
+        top_p / etc)
+  - [x] frontend/app.py _warn_if_tools_dropped() logs a stdlib-
+        logging WARNING with extra={dropped_fields, model, path}
+        when either non-empty field is present. Empty tools=[] is
+        deliberately NOT treated as a strip — prevents warning
+        spam for habitual-tools=[] clients.
+  - [x] tests/frontend/test_tools_stripped.py: 4 tests:
+          • tools + tool_choice present → 200 + WARN with both fields
+          • tools-only → 200 + WARN with ["tools"]
+          • no tools field → 200 + no WARN
+          • empty tools=[] → 200 + no WARN (anti-spam)
   - [x] `uv run ruff check src tests`          exits 0
   - [x] `uv run ruff format --check src tests` exits 0
-  - [x] `uv run pytest -q`                     28/28 green
-  - [x] scripts/gate_1.sh "scratch cwd sandbox test" flipped to [ok]
-        (8 of 10 phase-specific green after 1.5)
-  - [x] JOURNAL.jsonl: step_start + 3 decisions + step_done
+  - [x] `uv run pytest -q`                     32/32 green
+  - [x] scripts/gate_1.sh "client-sent tools are stripped with
+        warning" flipped to [ok] (9/10 phase-specific green)
+  - [x] JOURNAL.jsonl: step_start + 1 decision + step_done
 
-Scope — things 1.5 deliberately did NOT do:
-  - No OS-level sandbox. ROADMAP phase 1 defers to phase 3+.
-  - No CLI state isolation (decision #16 CLAUDE_CONFIG_DIR).
-  - No freeloader.toml (decision #10 lands phase 2). 1.5 only
-    touched the data_dir path.
-  - No startup cleanup of stale scratch dirs. Per-turn finally is
-    the only GC; a crashed process leaves a dir behind. Acceptable
-    for MVP.
+Scope — things 1.6 deliberately did NOT do:
+  - No output-parsing shim or passthrough. Phase 5 decision.
+  - No 400-on-tools. Existing clients keep working.
+  - No stream-aware strip. Phase 2.
+  - No allowlist.
 
-Next step: 1.6 — tools-strip.
-  - Frontend handler (or a router-level filter) drops `tools=[...]`
-    and `tool_choice` from the incoming request before dispatch,
-    and emits a single structured log WARNING naming the fields
-    dropped (PLAN hard problem #1: chat-only mitigation).
-  - tests/frontend/test_tools_stripped.py sends a request with
-    `tools=[{"type":"function",...}]` and `tool_choice="auto"` and
-    asserts:
-      • response still 200 OK (previously covered by 1.3's
-        "unknown fields allowed" test, but 1.6 formalizes the strip)
-      • the router/adapter receives no tools field at dispatch time
-      • a warning was logged (caplog capture)
-  - Flips "client-sent tools are stripped with warning" in gate_1
-    → green (9/10 after 1.6; 1/10 remaining is e2e for 1.7).
+Next step: 1.7 — end-to-end two-turn (closes phase 1).
+  - Conversation storage: <data_dir>/conversations/<id>.jsonl, one
+    line per CanonicalMessage, per decision #6.
+  - Conversation identity: SHA-256 of
+    (system_messages + first_user_message) per decision #14;
+    `X-FreelOAder-Conversation-Id: <opaque>` header override.
+  - Events log: <data_dir>/events.jsonl with per-turn `turn_done`
+    record {conversation_id, backend_session_id, provider, outcome,
+    usage}. Append-only, single-writer asyncio lock.
+  - Router stores {conversation_id → (provider, backend_session_id)}
+    in-memory binding; reads from the conversation file at startup if
+    an id shows up that isn't cached. Backend session id extracted
+    from SessionIdDelta.
+  - Frontend: call history_diff before dispatch; persist canonical
+    turn + write events.jsonl after dispatch.
+  - Test: tests/e2e/test_claude_two_turn.py spins up the FastAPI app
+    with a fake adapter that returns different session_ids / content
+    per call. First POST establishes the binding; second POST sends
+    the full message history with turn 1's assistant reply;
+    history_diff extracts just the new user turn; adapter.send is
+    called with resume_session_id=first-turn's session. Asserts
+    conversation_id is stable across turns and that `<data_dir>/
+    conversations/<id>.jsonl` has 4 lines (u1, a1, u2, a2) and
+    events.jsonl has 2 turn_done records.
+  - Flips the last gate_1 line → green = Gate 1 GREEN = Phase 1 DONE.
 
 Blockers: none.
 

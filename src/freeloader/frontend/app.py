@@ -8,6 +8,7 @@
 # never from freeloader.adapters.* directly.
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from typing import Any
@@ -19,6 +20,8 @@ from freeloader import __version__
 from freeloader.canonical.deltas import FinishDelta, TextDelta, UsageDelta
 from freeloader.router import Router
 
+logger = logging.getLogger(__name__)
+
 
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -27,12 +30,15 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    # extra="allow" so clients can send tools/temperature/etc without 422;
-    # unknown fields are silently ignored. Formal tools=[...] stripping is 1.6.
+    # extra="allow" for temperature / top_p / etc that we ignore silently.
+    # tools + tool_choice are recognized so we can log a structured warning
+    # when stripped (PLAN hard-problem #1, chat-only mode).
     model_config = ConfigDict(extra="allow")
     model: str
     messages: list[ChatMessage]
     stream: bool = False
+    tools: list[dict] | None = None
+    tool_choice: str | dict | None = None
 
 
 def create_app(router: Router | None = None) -> FastAPI:
@@ -46,6 +52,7 @@ def create_app(router: Router | None = None) -> FastAPI:
                 status_code=400,
                 detail="stream=true not yet supported (phase 2)",
             )
+        _warn_if_tools_dropped(req)
         messages = [m.model_dump() for m in req.messages]
 
         text_parts: list[str] = []
@@ -64,6 +71,25 @@ def create_app(router: Router | None = None) -> FastAPI:
         )
 
     return app
+
+
+def _warn_if_tools_dropped(req: ChatCompletionRequest) -> None:
+    # Chat-only mode: drop tools + tool_choice with a structured warning.
+    # Option 3 of PLAN hard problem #1 (shim / passthrough) is phase 5.
+    dropped: list[str] = []
+    if req.tools:
+        dropped.append("tools")
+    if req.tool_choice is not None:
+        dropped.append("tool_choice")
+    if dropped:
+        logger.warning(
+            "dropped client function-calling fields (chat-only mode)",
+            extra={
+                "dropped_fields": dropped,
+                "model": req.model,
+                "path": "/v1/chat/completions",
+            },
+        )
 
 
 def _build_chat_completion(
