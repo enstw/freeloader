@@ -8,6 +8,7 @@ authors = [{ name = "Jay Zhuang" }]
 license = { text = "Unlicense" }
 dependencies = [
     "pydantic>=2.9",
+    "fastapi>=0.115",
 ]
 
 [project.urls]
@@ -25,6 +26,7 @@ dev = [
     "ruff>=0.14",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "httpx>=0.27",
 ]
 
 [tool.ruff]

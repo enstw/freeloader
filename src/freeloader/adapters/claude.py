@@ -119,6 +119,32 @@ def _usage_from_claude_stats(stats: dict) -> ModelUsage:
     )
 
 
+def flatten_messages(messages: list[dict]) -> str:
+    """Role-tagged plaintext flatten (PLAN decision #3, minimal form).
+
+    CLIs take a single text prompt, not a structured role/content array.
+    Flattening preserves turn boundaries with explicit delimiters so a
+    prior assistant reply can't become prompt-injection fuel. Each role
+    opens `[ROLE]` and closes `[/ROLE]`; blocks are separated by a blank
+    line. Multimodal content blocks are reduced to their `text` parts
+    (non-text blocks are dropped for 1.3 — multimodal lands later).
+    """
+    parts: list[str] = []
+    for m in messages:
+        role = (m.get("role") or "user").upper()
+        content = m.get("content")
+        if isinstance(content, list):
+            text = "".join(
+                b.get("text", "") for b in content if b.get("type") == "text"
+            )
+        elif content is None:
+            text = ""
+        else:
+            text = str(content)
+        parts.append(f"[{role}]\n{text}\n[/{role}]")
+    return "\n\n".join(parts)
+
+
 async def parse_stream(lines: AsyncIterator[str]) -> AsyncIterator[Delta]:
     """Decode JSONL lines and yield Deltas. One malformed line becomes one
     ErrorDelta; the stream keeps flowing — a single corrupted line should

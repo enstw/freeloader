@@ -1,81 +1,82 @@
 # FreelOAder status — 2026-04-24
 
 ## Phase: 1/5 — ClaudeAdapter, non-streaming, single conversation
-## Step: 1.2 — ClaudeAdapter subprocess spawn + JSONL→Delta mapping + golden replay test  ✅ complete
-## Task: advance to step 1.3 — FastAPI frontend: /v1/chat/completions
-         (non-streaming) wired to a minimal router that invokes
-         ClaudeAdapter. Decision #12 (FastAPI) materializes here.
+## Step: 1.3 — FastAPI frontend: /v1/chat/completions (non-streaming) + minimal router  ✅ complete
+## Task: advance to step 1.4 — history_diff. Implement
+         diff_against_stored(conversation, incoming_messages) with the
+         three MVP cases (append-only / regenerate-last / mismatch),
+         define CanonicalMessage, and reconcile adapter/router
+         signatures with PLAN principle #1.
 
 Purpose (why this step existed):
-  Materialized PLAN principle #1 (the CLIAdapter seam) for the first
-  vendor: claude. Delta union is now code, not schema-in-a-doc.
-  `ClaudeAdapter.send()` has a real subprocess implementation so later
-  steps (1.3 frontend, 1.4 history_diff, 1.5 sandbox, 1.6 tools-strip,
-  1.7 e2e) have an adapter to call against. Golden-fixture replay test
-  (principle #8) locks the JSONL→Delta contract for all 7 variants.
+  Made PLAN decision #12 (FastAPI) and principle #6 (dumb frontend)
+  executable. Wired the architectural seam
+  "frontend → router → adapter" via Router injection so the fake
+  adapter pattern works in tests. Single-call /v1/chat/completions
+  round-trips Delta → ChatCompletion. Live claude still not exercised
+  — that's 1.7.
 
 Entry criteria (met):
-  - [x] Step 1.1 scaffold green (HEAD=5e250d4)
-  - [x] `uv run ruff` + `uv run pytest` pipeline green
-  - [x] src/freeloader/adapters/claude.py + canonical/ exist as stubs
-  - [x] Gate 1 file-existence slice green; 5 behavior tests red (expected)
+  - [x] Step 1.2 shipped (HEAD=713779b)
+  - [x] ClaudeAdapter.send + Delta union live
+  - [x] Golden test covers JSONL→Delta for all 7 variants
 
 Exit criteria (met):
-  - [x] src/freeloader/canonical/deltas.py defines Delta union with 7
-        variants (TextDelta, FinishDelta, SessionIdDelta, UsageDelta,
-        RateLimitDelta, ErrorDelta, RawDelta) + ModelUsage sub-model
-        per PLAN principle #1
-  - [x] src/freeloader/adapters/claude.py exports:
-          • map_event(event: dict) -> list[Delta]        pure mapper
-          • parse_stream(lines)                          async generator
-          • ClaudeAdapter.send(prompt, *, session_id,
-                               resume_session_id=None)   subprocess spawn
-  - [x] pyproject.toml adds `pydantic>=2.9` to runtime deps; uv.lock
-        regenerated
-  - [x] tests/adapters/__init__.py + tests/adapters/fixtures/
-        claude_basic.jsonl exist
-  - [x] tests/adapters/test_claude_golden.py — 7 async tests green,
-        covering: full turn replay, multi-text-block, unknown→RawDelta,
-        malformed-JSONL→ErrorDelta+continue, modelUsage-missing
-        fallback, error subtype→FinishDelta(error), blank-line skip
-  - [x] `uv run ruff check src tests`           exits 0
-  - [x] `uv run ruff format --check src tests`  exits 0
-  - [x] `uv run pytest -q`                      exits 0  (9/9 passed)
-  - [x] scripts/gate_1.sh "golden JSONL fixture replay for
-        ClaudeAdapter" flipped to [ok]  (6 of 10 phase-specific green)
-  - [x] JOURNAL.jsonl: step_start + 3 decisions + 1 lesson + step_done
+  - [x] pyproject.toml adds `fastapi>=0.115` runtime + `httpx>=0.27`
+        dev; uv.lock regenerated (10 new packages: fastapi, starlette,
+        anyio, httpx, httpcore, h11, certifi, idna, annotated-doc,
+        plus h11 transitive)
+  - [x] adapters/claude.py exports flatten_messages() producing
+        role-tagged plaintext ([ROLE]\n<text>\n[/ROLE])
+  - [x] src/freeloader/router.py: Router.dispatch(messages, *,
+        session_id=None, resume_session_id=None) → AsyncIterator[Delta]
+  - [x] src/freeloader/frontend/app.py: create_app(router=None) +
+        POST /v1/chat/completions handler (~50 lines per principle #6)
+  - [x] tests/frontend/__init__.py + test_chat_completions_
+        nonstreaming.py — 4 tests green:
+          • happy path: OpenAI ChatCompletion shape + flattened prompt
+          • stream=true → 400
+          • error FinishDelta → "error" finish_reason + zero usage
+          • unknown request fields (tools/temperature) accepted
+  - [x] app.py imports only from freeloader.router (cross-phase
+        invariant honored by convention)
+  - [x] `uv run ruff check src tests`          exits 0
+  - [x] `uv run ruff format --check src tests` exits 0
+  - [x] `uv run pytest -q`                     13/13 green
+  - [x] scripts/gate_1.sh common invariants + phase-1 checks stay
+        green; 6/10 phase-specific green (unchanged — 1.3 adds
+        infrastructure, not a new gated behavior test)
+  - [x] JOURNAL.jsonl: step_start + 3 decisions + step_done
 
-Scope — things 1.2 deliberately did NOT do:
-  - No live subprocess call in tests. Golden test feeds a fixture
-    through parse_stream() directly; subprocess path is exercised only
-    at step 1.7 e2e. Principle #8 coverage, not an integration test.
-  - No CanonicalMessage type. Adapter takes `prompt: str` for 1.2;
-    canonical-message flattening lands in 1.4 with history_diff.
-    Captured as JOURNAL decision (subject=adapter_prompt_signature).
-  - No `system` parameter on send(). Dead-slot speculation ruled out;
-    lands when the first caller materializes.
-  - No --add-dir / scratch cwd. Sandbox wiring is step 1.5.
-  - No tools=[...] stripping. Frontend work in step 1.6.
-  - No cancellation / SIGTERM-on-disconnect. Phase 2 concern; send()
-    has a best-effort terminate in finally so local aborted awaits
-    don't leak zombies, but no client-disconnect plumbing.
-  - No history replay, no role-tagged flatten format.
+Scope — things 1.3 deliberately did NOT do:
+  - No streaming. Phase 2. Handler rejects stream=true with 400.
+  - No tools=[...] stripping. 1.6. extra="allow" lets clients send
+    tools/temperature without 422; silently ignored.
+  - No history_diff. 1.4. Each turn flattens the full messages array.
+  - No conversation identity / session persistence. Fresh UUID per
+    request; 2-turn resume at 1.7.
+  - No auth (decision #2). Phase 2+.
+  - No uvicorn / server entry point. TestClient only; live-server
+    lands at 1.7 e2e.
+  - No sandbox (--add-dir). 1.5.
+  - No cancellation plumbing. Phase 2.
 
-Next step: 1.3 — FastAPI frontend.
-  - Add fastapi + uvicorn runtime deps (decision #12).
-  - src/freeloader/frontend/app.py: POST /v1/chat/completions handler,
-    non-streaming only, ~50 lines (principle #6). Strips unknown fields
-    for now; tools= stripping lands formally in 1.6.
-  - Minimal router src/freeloader/router.py: picks ClaudeAdapter (no
-    quota / round-robin yet — phase 3+ concern). Generates a fresh
-    session UUID per new conversation.
-  - Wraps Delta stream into a single OpenAI ChatCompletion response
-    object (concat TextDeltas, read FinishDelta + UsageDelta from the
-    terminal pair, include model name).
-  - tests/frontend/test_chat_completions_nonstreaming.py — uses
-    FastAPI TestClient with a fake ClaudeAdapter (yields canned
-    Deltas), asserts OpenAI response shape.
-  - Remains untested against live claude until step 1.7.
+Next step: 1.4 — history_diff.
+  - src/freeloader/canonical/history_diff.py (stub → real):
+    diff_against_stored(conversation, incoming_messages) returning
+    new_turn_messages. Three MVP cases per principle #4:
+    (a) append-only new turn, (b) client regeneration replacing the
+    last assistant turn, (c) mismatch when stored prefix diverges →
+    raise.
+  - src/freeloader/canonical/ grows a CanonicalMessage type
+    (role, content_blocks?, tool_calls?, metadata?). Minimal shape
+    for 1.4: role + text content.
+  - Router+Adapter signatures reconcile with PLAN principle #1:
+    send/dispatch now take canonical messages, not raw dicts.
+    flatten_messages moves to accepting list[CanonicalMessage].
+  - tests/canonical/test_history_diff.py covers the three cases.
+  - Flips "history_diff unit test exists" in gate_1 → green
+    (7/10 phase checks green after 1.4).
 
 Blockers: none.
 
