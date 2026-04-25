@@ -33,6 +33,7 @@ from freeloader.canonical.history_diff import (
 )
 from freeloader.canonical.identity import hash_of_prefix
 from freeloader.canonical.messages import CanonicalMessage, openai_to_canonical
+from freeloader.config import load_router_config
 from freeloader.frontend.sse import (
     DONE_SENTINEL,
     finish_chunk,
@@ -73,7 +74,7 @@ def create_app(
     store: object | None = None,
 ) -> FastAPI:
     app = FastAPI(title="FreelOAder", version=__version__)
-    r = router or Router()
+    r = router or Router(**load_router_config())
     s = store or default_store()
 
     @app.get("/v1/models")

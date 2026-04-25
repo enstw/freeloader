@@ -33,11 +33,13 @@ from freeloader.storage import _NoOpEventWriter, default_events
 
 logger = logging.getLogger(__name__)
 
-# Step 4.2a placeholder constants. 4.4 moves these to freeloader.toml
-# (PLAN decision #10). Round numbers, intentionally not tuned to any
-# vendor's published limits — tests inject their own values.
-INFERENCE_WINDOW_SECONDS: int = 300
-INFERENCE_TOKENS_THRESHOLD: int = 1_000_000
+# Inference threshold defaults. 4.4 moved the operator-facing knobs
+# to freeloader.toml (see config.load_router_config); these in-Router
+# fallbacks exist only for callers that construct a Router with
+# neither toml-loaded kwargs nor explicit overrides (e.g. older
+# tests). Keep in sync with config._DEFAULT_INFERENCE_*.
+_FALLBACK_INFERENCE_WINDOW_SECONDS: int = 300
+_FALLBACK_INFERENCE_TOKENS_THRESHOLD: int = 1_000_000
 
 # Providers that grow inferred quota signals from token usage. Claude
 # is excluded because it has native RateLimitDelta; double-emitting
@@ -127,12 +129,12 @@ class Router:
         self._inference_window_seconds: int = (
             inference_window_seconds
             if inference_window_seconds is not None
-            else INFERENCE_WINDOW_SECONDS
+            else _FALLBACK_INFERENCE_WINDOW_SECONDS
         )
         self._inference_tokens_threshold: int = (
             inference_tokens_threshold
             if inference_tokens_threshold is not None
-            else INFERENCE_TOKENS_THRESHOLD
+            else _FALLBACK_INFERENCE_TOKENS_THRESHOLD
         )
         # Injectable for test determinism — production uses the
         # drift-free monotonic clock; tests pass a manual ticker.
