@@ -25,6 +25,7 @@ from freeloader.canonical.deltas import (
     UsageDelta,
 )
 from freeloader.canonical.messages import CanonicalMessage
+from freeloader.core.quota import build_quota_signal
 from freeloader.core.routing import RoundRobinStrategy
 from freeloader.core.turn_state import Turn, TurnState
 from freeloader.storage import _NoOpEventWriter, default_events
@@ -208,11 +209,22 @@ class Router:
                             finish_reason = delta.reason
                         elif isinstance(delta, UsageDelta):
                             usage = delta
-                        elif (
-                            isinstance(delta, RateLimitDelta)
-                            and delta.status != "allowed"
-                        ):
-                            rate_limit_exceeded = True
+                        elif isinstance(delta, RateLimitDelta):
+                            # PLAN principle #5: every quota observation
+                            # gets its own append-only event. Emit before
+                            # forwarding so the journal order matches the
+                            # order the signal was seen on the wire (a
+                            # phase-4.3 strategy reading the log can react
+                            # within the same turn). Allowed records are
+                            # emitted too — pressure trends need them, not
+                            # just the breaches.
+                            self._emit_quota_signal(
+                                provider=provider,
+                                conversation_id=conversation_id,
+                                delta=delta,
+                            )
+                            if delta.status != "allowed":
+                                rate_limit_exceeded = True
                         yield delta
             except TimeoutError:
                 # PLAN decision #8: hard 5-minute cap. The deadline
@@ -307,6 +319,37 @@ class Router:
             # the inner generator's cleanup to fire, since `async for`
             # doesn't auto-close on exception.
             await adapter_gen.aclose()
+
+    def _emit_quota_signal(
+        self,
+        *,
+        provider: str,
+        conversation_id: str,
+        delta: RateLimitDelta,
+    ) -> None:
+        event = build_quota_signal(
+            provider=provider,
+            conversation_id=conversation_id,
+            delta=delta,
+            ts=_dt.datetime.now(_dt.UTC).isoformat(),
+        )
+        try:
+            self.events.write(event)
+        except Exception as exc:
+            # A failed quota_signal write is a forensic gap, not a turn
+            # failure — the turn is still streaming and the client gets
+            # its response. Surface via stdlib logger like _record_terminal
+            # so operators can spot a degraded journal.
+            logger.error(
+                "quota_signal write failed; quota stream has a gap",
+                extra={
+                    "conversation_id": conversation_id,
+                    "provider": provider,
+                    "rate_limit_type": delta.rate_limit_type,
+                    "status": delta.status,
+                    "error": str(exc),
+                },
+            )
 
     def _record_terminal(
         self,

@@ -119,7 +119,9 @@ async def test_rate_limit_exceeded_terminal_is_rate_limited():
     )
     router = Router(claude=adapter, events=events)
     await _drain(router)
-    e = events.events[0]
+    # Step 4.1: quota_signal events now precede turn_done; pick out
+    # the turn_done explicitly rather than indexing position 0.
+    e = next(ev for ev in events.events if ev["kind"] == "turn_done")
     # rate_limit_exceeded supersedes a clean stop.
     assert e["state"] == "rate_limited"
     # outcome still mirrors finish_reason (stop) — they're separate facets.
@@ -142,7 +144,8 @@ async def test_rate_limit_status_allowed_does_not_flip_terminal():
     )
     router = Router(claude=adapter, events=events)
     await _drain(router)
-    assert events.events[0]["state"] == "complete"
+    e = next(ev for ev in events.events if ev["kind"] == "turn_done")
+    assert e["state"] == "complete"
 
 
 async def test_empty_stream_terminal_is_backend_error():
