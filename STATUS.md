@@ -1,160 +1,140 @@
 # FreelOAder status — 2026-04-25
 
-## Phase: 4/5 — quota tracking + threshold switching
-## Step: 4.4 — thresholds come from freeloader.toml
+## Phase: 4/5 — quota tracking + threshold switching  ✅ GATE GREEN
+## Next phase: 5/5 — tool-call decision
+## Step: 5.1 — record the tool-call strategy decision in JOURNAL
 
-Purpose (why this step exists):
-  Step 4.2a introduced two placeholder constants in
-  `src/freeloader/router.py` (`INFERENCE_WINDOW_SECONDS=300`,
-  `INFERENCE_TOKENS_THRESHOLD=1_000_000`) with the comment "4.4 moves
-  these to freeloader.toml (PLAN decision #10)." This step removes
-  that "operator must edit Python source" anti-pattern: thresholds
-  become declarative, sit in a config file, and survive a
-  re-install. The Router constructor already accepts the values via
-  kwargs (router.py:76-77) — 4.4 only changes *where the values come
-  from* before construction. It also closes the last red square in
-  `gate_4.sh` so phase 4 can advance.
+Phase 5 purpose (ROADMAP § Phase 5):
+  Decide hard problem #1 with real data in hand. Phases 1–4 have
+  shipped the full chat-completion path (streaming, cancellation,
+  three adapters, quota-aware routing). The one thing the MVP still
+  hand-waves is `tools=[...]`: the frontend silently drops it with
+  a logged warning (`frontend/app.py:_warn_if_tools_dropped`) and
+  adapters never see function-calling fields at all (principle #6).
+  That is *de facto* chat-only mode without anyone having committed
+  to it being the answer. Phase 5 closes that ambiguity: pick a
+  strategy, write the decision down, prove it works end-to-end, and
+  document its limits.
 
-  ROADMAP § Phase 4: "Thresholds and weights come from
-  `freeloader.toml`."
+  The three options PLAN.md hard-problem #1 keeps open:
+  - **chat-only strip** — keep current behavior; document it as the
+    supported mode. Cheapest. Breaks agent frameworks that need
+    function calling (Aider, OpenAI agents SDK, ollama-bridge UIs).
+  - **output-parsing shim** — adapter detects natural-language tool
+    invocations in the CLI's reply, fakes `tool_calls` JSON back,
+    feeds tool results in on the next turn. Most flexible; most
+    fragile (CLI output isn't structured, prompt drift breaks the
+    parser, no machine-readable boundary).
+  - **passthrough** — advertise the CLI's *native* tools as if they
+    were the client's tools. Inverts the normal control flow; almost
+    no client knows how to handle "your tools are these things you
+    didn't ask for." Mostly a non-starter for OpenAI clients.
 
-Scope clarification — "thresholds and weights":
-  ROADMAP says "thresholds and weights." Only thresholds exist as a
-  concept today; `QuotaAwareStrategy` has no weight notion (it's a
-  cursor-rotating skip-if-pressured picker). Configuring a thing
-  that doesn't exist is wrong order — weights wait until weighted
-  strategy lands. 4.4 ships thresholds only.
+Step 5.1 — purpose:
+  Write the decision before the code. The implementation for any of
+  the three options is small (< 1 day); the decision is what's
+  load-bearing. Writing the decision first prevents post-hoc
+  rationalization — if chat-only is the right call, say so
+  explicitly and stop pretending the silent strip is a placeholder
+  for a shim that's coming "real soon now." If shim wins, the
+  rationale doc forces us to pre-state the constraints (which CLIs
+  surface tool calls in their output, what the prompt-injection
+  surface looks like, what the failure modes are when the parser
+  misses) before we start coding to them.
 
-Design (one sentence per file):
-  - `src/freeloader/config.py` — add `load_router_config()` returning
-    a dict of Router kwargs. Resolution order:
-      1. `FREELOADER_CONFIG` env var (explicit override; fail loud
-         if the path is set but unreadable)
-      1. `$cwd/freeloader.toml` (project-local config)
-      1. `<data_dir>/freeloader.toml` (user-global, via the existing
-         `resolve_data_dir()`)
-      1. built-in defaults matching the placeholder constants
-    Uses stdlib `tomllib` (Python 3.11+, no new dep). Malformed toml
-    → raises `RouterConfigError` with the source path. A typo
-    silently using defaults is exactly the bug-class config files
-    are supposed to prevent.
-  - `src/freeloader/router.py` — delete the
-    `INFERENCE_WINDOW_SECONDS` / `INFERENCE_TOKENS_THRESHOLD`
-    module-level constants; defaults move into `load_router_config()`
-    so there's a single source of truth. Router constructor
-    signature unchanged (kwargs still default to `None` and the
-    instance still keeps a `_inference_window_seconds` /
-    `_inference_tokens_threshold` field — tests inject their own).
-  - `src/freeloader/frontend/app.py:76` — change
-    `r = router or Router()` to
-    `r = router or Router(**load_router_config())` so the running
-    server picks up the toml.
-  - `tests/core/test_config_thresholds.py` (NEW, the file gate_4
-    looks for) covers:
-      * defaults returned when no toml present and no env override
-      * `FREELOADER_CONFIG` pointing at a temp toml — values land
-      * partial toml (only one of the two keys set) — other key
-        falls back to default
-      * malformed toml → raises with a clear message
-      * `FREELOADER_CONFIG` set to a missing path → raises (loud,
-        not silent fallback to defaults — explicit override means
-        the operator wanted those values)
-      * `$cwd/freeloader.toml` is preferred over `<data_dir>` when
-        both exist
-      * integration: `create_app()` constructs a Router whose
-        `_inference_window_seconds` / `_inference_tokens_threshold`
-        match values read from `$cwd/freeloader.toml`
+Step 5.1 — exit criteria:
+  - [ ] `JOURNAL.jsonl` has a `kind:decision` row with
+        `subject:tool_call_strategy` whose `choice` field is
+        exactly one of: `chat_only_strip`, `output_parsing_shim`,
+        `passthrough`.
+  - [ ] The same row carries a `rationale` field grounded in
+        evidence from phases 1–4 (not abstract preference): cite
+        which CLIs do/don't surface tool-call boundaries in their
+        JSONL streams, the cold-cache cost of multi-turn shim
+        round-trips, the per-adapter system-prompt-injection
+        constraint (PLAN.md line 779-786), and the
+        `num_turns > 1` agent-loop contamination observation
+        (PLAN spike 2026-04-05).
+  - [ ] STATUS.md updated to scope step 5.2 with the chosen
+        strategy named (so 5.2 stops being abstract).
 
-Schema (flat — single section, no per-provider override):
-  ```toml
-  [router]
-  inference_window_seconds = 300
-  inference_tokens_threshold = 1_000_000
-  ```
-  Single window+threshold applied to all inferred providers (codex,
-  gemini). Per-provider overrides are deferred — PLAN doesn't ask
-  for them; adding now would be premature.
+Phase 5 sketch (5.2–5.4 will be re-scoped after 5.1 picks):
+  - 5.1 record decision in JOURNAL (this step).
+  - 5.2 formalize chosen strategy in code:
+        * if chat-only: lift `_warn_if_tools_dropped` from "silent
+          warning" to "structured 200 response with explicit
+          `tool_calls=[]` and operator-visible signal";
+        * if shim: build the adapter-owned shim (system-prompt slot
+          stays under adapter control per PLAN.md line 793);
+        * if passthrough: build the `/v1/models`-driven tool
+          discovery surface.
+  - 5.3 `tests/e2e/test_tool_calls.py` exercising `tools=[...]`
+        end-to-end through the chosen strategy (gate_5 requires
+        this file to exist).
+  - 5.4 README section documenting the supported tool-call mode
+        and its limits — gate_5 grep's case-insensitive for
+        "tool call".
 
-Why fail-loud on malformed toml (not silent default):
-  A typo in `freeloader.toml` silently using defaults would be
-  exactly the bug where you spend an hour wondering why your
-  threshold change had no effect. This config file's whole job is
-  to be a knob the operator turns; if the knob is jammed, fail
-  visibly. (Same reasoning as 4.1 — surface the surprising state.)
+Phase 5 exit criteria (matches gate_5.sh + ROADMAP):
+  - [ ] `JOURNAL.jsonl` has a `kind:decision` row with
+        `subject:tool_call_strategy`.
+  - [ ] `tests/e2e/test_tool_calls.py` exists, exercises
+        `tools=[...]` end-to-end through the chosen strategy, and
+        is green.
+  - [ ] If the chosen strategy is `output_parsing_shim`: the shim
+        code lives entirely inside an adapter (no frontend imports
+        of adapter-specific tool logic; the system-prompt slot is
+        owned by the adapter).
+  - [ ] `README.md` has a section documenting the supported
+        tool-call mode and its limits.
+  - [ ] `gate_5.sh` exits 0 (also re-runs gate_4).
 
-Why not load config in `Router.__init__`:
-  The Router doesn't know its config source; that's the caller's
-  job (production = `frontend/app.py`, tests = explicit kwargs).
-  Pushing toml-loading into the constructor would force every test
-  to either tolerate or stub a filesystem read. Keep the seam at
-  the call site.
+Out of scope for phase 5:
+  - **Multi-mode support** — pick *one* strategy. PLAN.md says
+    "picked per-use-case" but we don't yet have multiple use cases
+    in production; choosing a default first, adding mode flags
+    later, is cheaper than building configuration for something
+    that may never get a second user.
+  - **Adapter-specific shim quality tuning** — if shim wins, ship
+    the simplest version that passes the e2e test; tuning regex
+    fragility is a separate workstream.
+  - **Persisted tool-call history** — if shim wins, `tool_calls` /
+    `tool` messages added to the canonical store are out of scope
+    until phase 5 proves the round-trip works at all. (May force
+    an `openai_to_canonical` extension; deferred.)
+  - **Tool *discovery* via `/v1/models`** — gate_5 doesn't ask, and
+    the shape question (do we list each CLI's native tools as
+    OpenAI tool definitions?) only matters if passthrough wins.
 
-Exit criteria for step 4.4:
-  - [ ] `src/freeloader/config.py` has `load_router_config()` with
-        the resolution order above, returns a dict suitable for
-        `Router(**...)`, raises `RouterConfigError` (or stdlib
-        equivalent) on malformed toml or missing `FREELOADER_CONFIG`
-        path.
-  - [ ] `src/freeloader/router.py` no longer defines
-        `INFERENCE_WINDOW_SECONDS` / `INFERENCE_TOKENS_THRESHOLD`
-        as module-level constants; defaults live in `config.py`.
-  - [ ] `src/freeloader/frontend/app.py` calls
-        `load_router_config()` when constructing the default
-        Router.
-  - [ ] `tests/core/test_config_thresholds.py` covers all six
-        cases listed in Design.
-  - [ ] All existing tests still green (218 → ~225 expected).
-  - [ ] ruff check + ruff format clean.
-  - [ ] `gate_4.sh` fully GREEN (closes the last red square,
-        unblocks `phase_done` for phase 4).
+Recent lessons relevant to phase 5 (see JOURNAL.jsonl for full text):
+  - frontend is dumb (principle #6): tools must be handled at the
+    frontend boundary or by an adapter that opts in — never by the
+    router or by canonical/.
+  - `frontend/app.py:_warn_if_tools_dropped` is the only place
+    today that touches `tools` / `tool_choice`; logs a warning and
+    discards. Phase 5 either keeps that or replaces it.
+  - canonical/ has no `tool_calls` / `tool` role support today
+    (`CanonicalMessage.role` is `system|user|assistant|developer`).
+    A shim or passthrough would force that schema change.
+  - claude/codex/gemini all execute *their own* native tools
+    invisibly under OAuth — `num_turns > 1` is observable but not
+    preventable (PLAN spike, 2026-04-05). The frontend does NOT
+    know when the CLI ran tools internally.
+  - cold-cache tax: every shim round-trip is two CLI invocations
+    instead of one — relevant input to the shim-vs-chat-only cost
+    analysis (PLAN line 239-244).
+  - claude `--system-prompt` is limited under OAuth; gemini has no
+    obvious injection point; codex injects via `-c` config
+    overrides (PLAN line 779-786). If shim wins, the per-adapter
+    system-prompt slot becomes load-bearing.
 
-Out of scope for 4.4 (deferred):
-  - Per-provider threshold overrides (`[router.codex]
-    inference_tokens_threshold = ...`). PLAN doesn't ask; codex and
-    gemini share one threshold today. Trivially additive later.
-  - Strategy weights — no weight concept exists in
-    `QuotaAwareStrategy`. Lands with weighted strategy if/when.
-  - Adapter list / model-name routing config from PLAN.md line 674.
-    Separate config surface, not what gate_4 checks.
-  - Runtime config reload — PLAN.md line 677 explicitly: "No
-    runtime config reloading in the MVP."
-  - 4.2b (gemini/codex 429 detection) — independent; can land
-    after phase 4.
-
-Phase 4 sketch:
-  - 4.1 claude rate_limit_event → quota_signal events ✅
-  - 4.2a gemini/codex token-window inference ✅
-  - 4.2b gemini/codex 429 detection (adapter stderr work) — deferred
-    past phase 4 (additive; consumed transparently by 4.3 + 4.5)
-  - 4.3 Quota-aware Strategy reading the derived view ✅
-  - 4.4 Threshold config in freeloader.toml (this step).
-  - 4.5 Replay test ✅
-
-Recent lessons (see JOURNAL.jsonl for full text):
-  - claude -p exits 0 on rate_limit; inspect events
-  - cold cache tax 6k–14k input tokens; warm conversations matter
-  - agent-loop contamination observable not preventable under OAuth
-  - gemini compound provider (stats.models per turn); UUID
-    session_id (spike drift)
-  - GEMINI_CLI_HOME couples auth to state — per-adapter mutex
-    fallback per PLAN decision #16
-  - codex exec resume rejects -s; sandbox set on first turn persists
-  - codex --json emits pure JSONL on stdout; no model id field
-  - asyncio create_subprocess_exec env=dict REPLACES env entirely
-  - Starlette aclose() injects GeneratorExit, not CancelledError
-  - json.dumps default separators differ from OpenAI wire bytes
-  - Router._bindings is now (provider, sid|None); None pins for
-    replay (mid-conversation provider switch)
-  - 4.1 frozen quota_signal shape: rate_limit_type/status/resets_at/
-    overage_status/raw — sibling builders must produce identical
-    shape so 4.3 reads ONE stream
-  - 4.2a inferred token-window pressure for codex/gemini; in-memory
-    rolling window per provider; same canonical shape with
-    rate_limit_type="inferred_window"
-  - 4.3 Strategy.observe(event) is fed only after a successful
-    journal write — keeps strategy view aligned with the durable
-    record so a restart that re-reads JOURNAL gives the same state
-  - 4.5 fixture FILES (not inline literals) prove the replay
-    consumer parses bytes the same way the production journal
-    would be re-read; canonical-builder shape drift breaks replay
-    loud (a desirable forcing function)
+Phase 4 just shipped:
+  - 4.1 ✅ claude rate_limit_event → quota_signal
+  - 4.2a ✅ gemini/codex token-window inference
+  - 4.2b ⏸ deferred (additive; 4.3 + 4.5 already consume any
+    future quota_signal transparently)
+  - 4.3 ✅ quota-aware strategy
+  - 4.4 ✅ freeloader.toml thresholds
+  - 4.5 ✅ deterministic routing replay
+  Test count at phase boundary: 232. Branch is 39 commits ahead of
+  origin/main (solo repo; no PR flow per memory).
