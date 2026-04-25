@@ -100,3 +100,4 @@
 {"ts": "2026-04-25T02:46:00Z", "kind": "step_done", "text": "3.1", "phase": "3", "step": "3.1", "subject": "codex_adapter"}
 {"ts": "2026-04-25T02:46:02Z", "kind": "lesson", "text": "codex exec resume rejects -s/sandbox flag; sandbox policy is set on first-turn exec and persists through subsequent resumes. CodexAdapter must omit -s on resume.", "subject": "codex_resume_no_sandbox", "severity": "medium"}
 {"ts": "2026-04-25T02:46:11Z", "kind": "lesson", "text": "codex exec --json emits pure JSONL on stdout; chatter ('Reading additional input from stdin...', 'Shell cwd was reset to ...') goes to stderr. Adapter ignores stderr — same shape as claude. No model identifier appears in any codex event; UsageDelta uses 'codex' provider tag until the CLI surfaces sub-model identity.", "subject": "codex_jsonl_shape", "severity": "low"}
+{"ts": "2026-04-25T02:49:38Z", "kind": "step_start", "text": "3.2", "phase": "3", "step": "3.2", "subject": "cli_state_isolation"}
