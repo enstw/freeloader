@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019dc284-eb77-7b42-9b16-17b99089cd17"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Hello! The answer is 42."}}
+{"type":"turn.completed","usage":{"input_tokens":15696,"cached_input_tokens":3456,"output_tokens":32}}
