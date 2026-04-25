@@ -47,6 +47,17 @@ from freeloader.storage import default_store
 
 logger = logging.getLogger(__name__)
 
+# Phase 5 (decision: chat_only_strip): the frontend is in chat-only mode.
+# When a request carries `tools` or `tool_choice`, those fields are stripped
+# before reaching the router and the response carries an explicit, on-the-
+# wire signal so the client can detect the strip without inferring it from
+# "the model didn't call my function." Header is set on both streaming and
+# non-streaming responses; non-streaming additionally surfaces `tool_calls=[]`
+# in the message body (OpenAI clients reading `tool_calls` get a deterministic
+# empty list, not a missing field).
+TOOL_MODE_HEADER = "X-FreelOAder-Tool-Mode"
+TOOL_MODE_VALUE = "chat-only-strip"
+
 
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -111,12 +122,12 @@ def create_app(
             default=None, alias="X-FreelOAder-Conversation-Id"
         ),
     ) -> Any:
-        _warn_if_tools_dropped(req)
-
         openai_messages = [m.model_dump() for m in req.messages]
         incoming = [openai_to_canonical(m) for m in openai_messages]
 
         conv_id = x_freeloader_conversation_id or hash_of_prefix(openai_messages)
+        tools_dropped = _warn_if_tools_dropped(req, conv_id)
+
         stored = s.load(conv_id)
 
         try:
@@ -130,6 +141,9 @@ def create_app(
             include_usage = bool(
                 req.stream_options and req.stream_options.include_usage
             )
+            headers = {"X-FreelOAder-Conversation-Id": conv_id}
+            if tools_dropped:
+                headers[TOOL_MODE_HEADER] = TOOL_MODE_VALUE
             return StreamingResponse(
                 _stream_chat_completion(
                     router=r,
@@ -142,7 +156,7 @@ def create_app(
                     include_usage=include_usage,
                 ),
                 media_type="text/event-stream",
-                headers={"X-FreelOAder-Conversation-Id": conv_id},
+                headers=headers,
             )
 
         text_parts: list[str] = []
@@ -166,7 +180,11 @@ def create_app(
         )
 
         response.headers["X-FreelOAder-Conversation-Id"] = conv_id
-        return _build_chat_completion(req.model, assistant_text, finish_reason, usage)
+        if tools_dropped:
+            response.headers[TOOL_MODE_HEADER] = TOOL_MODE_VALUE
+        return _build_chat_completion(
+            req.model, assistant_text, finish_reason, usage, tools_dropped=tools_dropped
+        )
 
     return app
 
@@ -259,9 +277,10 @@ def _usage_dict(usage: UsageDelta | None) -> dict[str, int]:
     }
 
 
-def _warn_if_tools_dropped(req: ChatCompletionRequest) -> None:
-    # Chat-only mode: drop tools + tool_choice with a structured warning.
-    # Option 3 of PLAN hard problem #1 (shim / passthrough) is phase 5.
+def _warn_if_tools_dropped(req: ChatCompletionRequest, conversation_id: str) -> bool:
+    # Chat-only mode (phase 5 decision: chat_only_strip). Returns True iff
+    # tool fields were present and stripped — caller uses it to set the
+    # X-FreelOAder-Tool-Mode header and the tool_calls=[] message field.
     dropped: list[str] = []
     if req.tools:
         dropped.append("tools")
@@ -274,13 +293,25 @@ def _warn_if_tools_dropped(req: ChatCompletionRequest) -> None:
                 "dropped_fields": dropped,
                 "model": req.model,
                 "path": "/v1/chat/completions",
+                "mode": TOOL_MODE_VALUE,
+                "conversation_id": conversation_id,
             },
         )
+        return True
+    return False
 
 
 def _build_chat_completion(
-    model: str, text: str, finish_reason: str, usage: UsageDelta | None
+    model: str,
+    text: str,
+    finish_reason: str,
+    usage: UsageDelta | None,
+    *,
+    tools_dropped: bool = False,
 ) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant", "content": text}
+    if tools_dropped:
+        message["tool_calls"] = []
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
@@ -289,7 +320,7 @@ def _build_chat_completion(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": text},
+                "message": message,
                 "finish_reason": finish_reason,
             }
         ],

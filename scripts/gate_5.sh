@@ -13,9 +13,20 @@ echo "─ phase 5 specific ─"
 gate_check "phase 4 gate still green" scripts/gate_4.sh
 
 # A written decision must exist in the journal with subject=tool_call_strategy.
-gate_check "tool-call decision recorded in JOURNAL" bash -c '
-  grep -q "\"kind\":\"decision\"" JOURNAL.jsonl \
-    && grep -q "\"subject\":\"tool_call_strategy\"" JOURNAL.jsonl
+# Use a python json scan instead of grep — reflect.sh writes whitespace-laden
+# JSON ("kind": "decision") while early bootstrap entries are no-space; an
+# anchored grep flips depending on which entry happened to land first.
+gate_check "tool-call decision recorded in JOURNAL" python3 -c '
+import json, sys
+with open("JOURNAL.jsonl") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line)
+        if rec.get("kind") == "decision" and rec.get("subject") == "tool_call_strategy":
+            sys.exit(0)
+sys.exit(1)
 '
 
 gate_check "end-to-end tool_calls test exists" \
