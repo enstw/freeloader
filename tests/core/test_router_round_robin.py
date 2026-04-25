@@ -84,7 +84,11 @@ async def test_three_fresh_conversations_cycle_through_providers():
     assert len(codex.calls) == 1
     assert len(gemini.calls) == 1
     # The journal records which provider handled each conversation.
-    assert [e["provider"] for e in events.events] == ["claude", "codex", "gemini"]
+    # Step 4.2a: codex/gemini turns now also emit an inferred
+    # quota_signal alongside turn_done — filter to turn_done so the
+    # provider order is unambiguous.
+    turn_dones = [e for e in events.events if e["kind"] == "turn_done"]
+    assert [e["provider"] for e in turn_dones] == ["claude", "codex", "gemini"]
 
 
 async def test_cycle_wraps_after_exhausting_pool():
@@ -99,7 +103,10 @@ async def test_cycle_wraps_after_exhausting_pool():
     # 5 conversations, 2 providers → claude gets 3 turns, codex gets 2.
     assert len(claude.calls) == 3
     assert len(codex.calls) == 2
-    assert [e["provider"] for e in events.events] == [
+    # Step 4.2a: codex turns now also emit an inferred quota_signal —
+    # filter to turn_done so the cycle order is unambiguous.
+    turn_dones = [e for e in events.events if e["kind"] == "turn_done"]
+    assert [e["provider"] for e in turn_dones] == [
         "claude",
         "codex",
         "claude",

@@ -121,3 +121,4 @@
 {"ts": "2026-04-25T03:53:22Z", "kind": "phase_done", "text": "phase 3 complete", "phase": "3", "commit": "8be1768a80b397b66555bace6fb61af551bace68"}
 {"ts": "2026-04-25T03:53:24Z", "kind": "phase_start", "text": "begin phase 4", "phase": "4", "source": "ROADMAP.md#phase-4"}
 {"ts": "2026-04-25T05:18:11Z", "kind": "decision", "text": "step 4.1 — quota_signal canonical event shape; emit per-RateLimitDelta including allowed; emitted before turn_done", "key": "quota_signal_canonical_shape", "phase": "4", "step": "4.1"}
+{"ts": "2026-04-25T05:38:48Z", "kind": "decision", "text": "step 4.2a — token-window inference for gemini/codex; per-provider rolling window in Router emits build_quota_signal_from_usage(rate_limit_type=inferred_window); claude excluded to avoid double-counting native RateLimitDelta; 429 detection split to 4.2b (needs adapter stderr work)"}

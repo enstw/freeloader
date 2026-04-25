@@ -330,10 +330,18 @@ async def test_quota_signal_carries_dispatched_provider_name():
     router = Router(codex=codex_adapter, events=events)
     await _drain(router, conv_id="conv-codex-only")
 
-    qs = _quota_signals(events.events)
-    assert len(qs) == 1
-    assert qs[0]["provider"] == "codex"
-    assert qs[0]["conversation_id"] == "conv-codex-only"
+    # Step 4.2a: codex turns now also emit an inferred quota_signal
+    # from the UsageDelta. Filter to the NATIVE record (the one this
+    # test exists to verify — that vendor delta → router-selected
+    # provider name plumbing works regardless of vendor).
+    native = [
+        e
+        for e in _quota_signals(events.events)
+        if e["rate_limit_type"] != "inferred_window"
+    ]
+    assert len(native) == 1
+    assert native[0]["provider"] == "codex"
+    assert native[0]["conversation_id"] == "conv-codex-only"
 
 
 async def test_quota_signal_write_failure_logged_not_silent(caplog):

@@ -12,8 +12,9 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import logging
+import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Protocol
 
 from freeloader.adapters.claude import ClaudeAdapter
@@ -25,12 +26,24 @@ from freeloader.canonical.deltas import (
     UsageDelta,
 )
 from freeloader.canonical.messages import CanonicalMessage
-from freeloader.core.quota import build_quota_signal
+from freeloader.core.quota import build_quota_signal, build_quota_signal_from_usage
 from freeloader.core.routing import RoundRobinStrategy
 from freeloader.core.turn_state import Turn, TurnState
 from freeloader.storage import _NoOpEventWriter, default_events
 
 logger = logging.getLogger(__name__)
+
+# Step 4.2a placeholder constants. 4.4 moves these to freeloader.toml
+# (PLAN decision #10). Round numbers, intentionally not tuned to any
+# vendor's published limits — tests inject their own values.
+INFERENCE_WINDOW_SECONDS: int = 300
+INFERENCE_TOKENS_THRESHOLD: int = 1_000_000
+
+# Providers that grow inferred quota signals from token usage. Claude
+# is excluded because it has native RateLimitDelta; double-emitting
+# would double-count in 4.3's Strategy. New providers default to
+# excluded until explicitly added here.
+_INFERENCE_PROVIDERS: frozenset[str] = frozenset({"codex", "gemini"})
 
 
 class _Adapter(Protocol):
@@ -60,6 +73,9 @@ class Router:
         *,
         turn_timeout_seconds: float | None = None,
         strategy: object | None = None,
+        inference_window_seconds: int | None = None,
+        inference_tokens_threshold: int | None = None,
+        now_monotonic: Callable[[], float] | None = None,
     ) -> None:
         # Build the active provider pool. Ordering follows the kwarg
         # order: claude → codex → gemini. That order is the round-
@@ -101,6 +117,28 @@ class Router:
         #     stored as None.
         # In-memory for phase 3; durable storage is a later concern.
         self._bindings: dict[str, tuple[str, str | None]] = {}
+
+        # Step 4.2a: per-provider rolling token windows for inference.
+        # {provider → list[(monotonic_ts, total_tokens_for_that_turn)]}.
+        # In-memory only — restart loses the window, but the durable
+        # quota_signal events on disk are the persistent record (the
+        # window is just a derived view).
+        self._token_windows: dict[str, list[tuple[float, int]]] = {}
+        self._inference_window_seconds: int = (
+            inference_window_seconds
+            if inference_window_seconds is not None
+            else INFERENCE_WINDOW_SECONDS
+        )
+        self._inference_tokens_threshold: int = (
+            inference_tokens_threshold
+            if inference_tokens_threshold is not None
+            else INFERENCE_TOKENS_THRESHOLD
+        )
+        # Injectable for test determinism — production uses the
+        # drift-free monotonic clock; tests pass a manual ticker.
+        self._now_monotonic: Callable[[], float] = (
+            now_monotonic if now_monotonic is not None else time.monotonic
+        )
 
     @property
     def claude(self) -> _Adapter | None:
@@ -209,6 +247,19 @@ class Router:
                             finish_reason = delta.reason
                         elif isinstance(delta, UsageDelta):
                             usage = delta
+                            # Step 4.2a: providers without native quota
+                            # telemetry get an inferred quota_signal
+                            # built from a rolling token window.
+                            # Claude is excluded — its native
+                            # RateLimitDelta path (above) is the source
+                            # of truth and double-emitting would
+                            # double-count in 4.3's Strategy.
+                            if provider in _INFERENCE_PROVIDERS:
+                                self._emit_inferred_quota_signal(
+                                    provider=provider,
+                                    conversation_id=conversation_id,
+                                    usage=delta,
+                                )
                         elif isinstance(delta, RateLimitDelta):
                             # PLAN principle #5: every quota observation
                             # gets its own append-only event. Emit before
@@ -319,6 +370,58 @@ class Router:
             # the inner generator's cleanup to fire, since `async for`
             # doesn't auto-close on exception.
             await adapter_gen.aclose()
+
+    def _emit_inferred_quota_signal(
+        self,
+        *,
+        provider: str,
+        conversation_id: str,
+        usage: UsageDelta,
+    ) -> None:
+        """Step 4.2a: append this turn's token total to the provider's
+        rolling window, evict expired entries, and emit one synthetic
+        quota_signal carrying the windowed pressure picture."""
+        now = self._now_monotonic()
+        # Sum input + output across all sub-models. Cached input tokens
+        # are excluded — they typically don't count toward quota and
+        # would distort the pressure signal upward.
+        total_tokens = sum(
+            m.input_tokens + m.output_tokens for m in usage.models.values()
+        )
+        window = self._token_windows.setdefault(provider, [])
+        window.append((now, total_tokens))
+        cutoff = now - self._inference_window_seconds
+        # Evict entries older than the window. Linear scan; window
+        # stays small at typical turn rates so simple beats clever.
+        self._token_windows[provider] = [
+            (ts, tokens) for ts, tokens in window if ts >= cutoff
+        ]
+        window_tokens = sum(tokens for _, tokens in self._token_windows[provider])
+
+        event = build_quota_signal_from_usage(
+            provider=provider,
+            conversation_id=conversation_id,
+            window_seconds=self._inference_window_seconds,
+            window_tokens=window_tokens,
+            tokens_threshold=self._inference_tokens_threshold,
+            ts=_dt.datetime.now(_dt.UTC).isoformat(),
+        )
+        try:
+            self.events.write(event)
+        except Exception as exc:
+            # Same write-failure discipline as _emit_quota_signal: a
+            # forensic gap, not a turn failure. Surface via stdlib
+            # logger so operators see degraded inference coverage.
+            logger.error(
+                "inferred quota_signal write failed; quota stream has a gap",
+                extra={
+                    "conversation_id": conversation_id,
+                    "provider": provider,
+                    "window_tokens": window_tokens,
+                    "tokens_threshold": self._inference_tokens_threshold,
+                    "error": str(exc),
+                },
+            )
 
     def _emit_quota_signal(
         self,
