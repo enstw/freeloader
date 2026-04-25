@@ -52,5 +52,11 @@ ignore = [
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-addopts = "-ra"
+# Default run excludes `smoke` — those tests spawn real CLI subprocesses,
+# require live OAuth, and cost real money per turn (~$0.10+ for claude).
+# Run them explicitly with `uv run pytest -m smoke`.
+addopts = "-ra -m 'not smoke'"
 asyncio_mode = "auto"
+markers = [
+  "smoke: live-CLI smoke tests; opt-in via `-m smoke`. Requires the relevant CLI on PATH and authenticated.",
+]
