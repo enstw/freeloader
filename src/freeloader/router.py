@@ -1,9 +1,12 @@
-# Router — dispatches to ClaudeAdapter, manages conversation→backend
-# binding (PLAN principle #3), drives the per-turn state machine
-# (principle #2), emits turn_done events (principle #7).
+# Router — selects an adapter per turn (PLAN principle #5, simplest
+# policy: round-robin across the registered providers), manages the
+# conversation→(provider, backend_session_id) binding (principle #3),
+# drives the per-turn state machine (principle #2), emits turn_done
+# events (principle #7).
 #
-# Phase 1 scope: one backend. Quota-aware routing (principle #5) lands
-# phase 4; round-robin lands phase 3.
+# Round-robin is the placeholder strategy. Quota-aware routing
+# (principle #5) lands phase 4; provider-switch + canonical-history
+# replay lands step 3.5.
 from __future__ import annotations
 
 import asyncio
@@ -49,19 +52,61 @@ class Router:
     def __init__(
         self,
         claude: _Adapter | None = None,
+        codex: _Adapter | None = None,
+        gemini: _Adapter | None = None,
         events: object | None = None,
         *,
         turn_timeout_seconds: float | None = None,
     ) -> None:
-        self.claude: _Adapter = claude or ClaudeAdapter()
+        # Build the active provider pool. Ordering follows the kwarg
+        # order: claude → codex → gemini. That order is the round-
+        # robin cycle order (Python dicts preserve insertion order,
+        # which lets us derive the cycle from a single source of
+        # truth).
+        adapters: dict[str, _Adapter] = {}
+        if claude is not None:
+            adapters["claude"] = claude
+        if codex is not None:
+            adapters["codex"] = codex
+        if gemini is not None:
+            adapters["gemini"] = gemini
+        if not adapters:
+            # Phase-1 backward compat: no adapters supplied → default
+            # to a single ClaudeAdapter. Most existing tests rely on
+            # this; the round-robin behavior is opt-in by passing 2+.
+            adapters["claude"] = ClaudeAdapter()
+        self._adapters: dict[str, _Adapter] = adapters
+        self._provider_order: list[str] = list(adapters.keys())
+        self._next_provider_idx: int = 0
+
         self.events = events or default_events()
         self.turn_timeout_seconds: float = (
             turn_timeout_seconds
             if turn_timeout_seconds is not None
             else self.DEFAULT_TURN_TIMEOUT_SECONDS
         )
-        # {conversation_id → backend_session_id}. In-memory for phase 1.
-        self._bindings: dict[str, str] = {}
+        # {conversation_id → (provider_name, backend_session_id)}.
+        # Provider is recorded so a resumed turn dispatches to the
+        # same adapter that started the conversation. In-memory for
+        # phase 3; durable storage is a later concern.
+        self._bindings: dict[str, tuple[str, str]] = {}
+
+    @property
+    def claude(self) -> _Adapter | None:
+        """Backward-compat accessor for the claude adapter slot;
+        phase-1 tests reach in here. Returns None if claude isn't in
+        the active pool."""
+        return self._adapters.get("claude")
+
+    def _pick_next_provider(self) -> str:
+        """Round-robin step. Advances the index and wraps. Called
+        only on first-turn dispatch for a conversation; resumed turns
+        dispatch via the binding's recorded provider."""
+        provider = self._provider_order[
+            self._next_provider_idx % len(self._provider_order)
+        ]
+        self._next_provider_idx += 1
+        return provider
 
     async def dispatch(
         self,
@@ -72,17 +117,22 @@ class Router:
     ) -> AsyncIterator[Delta]:
         turn = Turn()  # QUEUED
 
-        backend_sid = self._bindings.get(conversation_id)
-        if backend_sid:
+        binding = self._bindings.get(conversation_id)
+        if binding is not None:
+            provider, backend_sid = binding
             # Resume: send only the new turn; the backend has the history.
             prompt = _flatten_canonical(new_messages)
             resume = backend_sid
         else:
+            provider = self._pick_next_provider()
+            backend_sid = None
             # First contact with this conversation's backend: replay full
             # canonical history into the first turn (PLAN principle #3).
             prompt = _flatten_canonical(stored_messages + new_messages)
             resume = None
         session_id = backend_sid or str(uuid.uuid4())
+
+        adapter = self._adapters[provider]
 
         # Holds the backend session id that was *observed* during this turn.
         # Committed to self._bindings only when a non-cancelled terminal is
@@ -95,7 +145,7 @@ class Router:
         rate_limit_exceeded = False
 
         turn.goto(TurnState.SPAWNING)
-        adapter_gen = self.claude.send(
+        adapter_gen = adapter.send(
             prompt,
             conversation_id=conversation_id,
             session_id=session_id,
@@ -136,6 +186,7 @@ class Router:
                     turn=turn,
                     conversation_id=conversation_id,
                     captured_sid=observed_sid or session_id,
+                    provider=provider,
                     finish_reason="timed_out",
                     usage=usage,
                 )
@@ -156,6 +207,7 @@ class Router:
                     # Record what we observed for the forensic trail, but
                     # do NOT bind: the next turn will start fresh.
                     captured_sid=observed_sid or session_id,
+                    provider=provider,
                     finish_reason="cancelled",
                     usage=usage,
                 )
@@ -166,6 +218,7 @@ class Router:
                     turn=turn,
                     conversation_id=conversation_id,
                     captured_sid=observed_sid or session_id,
+                    provider=provider,
                     finish_reason="error",
                     usage=None,
                 )
@@ -196,12 +249,13 @@ class Router:
             # session in a consistent state, so the binding is safe to
             # keep.
             committed_sid = observed_sid or session_id
-            self._bindings[conversation_id] = committed_sid
+            self._bindings[conversation_id] = (provider, committed_sid)
 
             self._record_terminal(
                 turn=turn,
                 conversation_id=conversation_id,
                 captured_sid=committed_sid,
+                provider=provider,
                 finish_reason=finish_reason,
                 usage=usage,
             )
@@ -219,6 +273,7 @@ class Router:
         turn: Turn,
         conversation_id: str,
         captured_sid: str,
+        provider: str,
         finish_reason: str,
         usage: UsageDelta | None,
     ) -> None:
@@ -227,7 +282,7 @@ class Router:
             "kind": "turn_done",
             "conversation_id": conversation_id,
             "backend_session_id": captured_sid,
-            "provider": "claude",
+            "provider": provider,
             "state": turn.state.value,
             # Keep `outcome` for backward compat with phase-1 consumers
             # (the e2e test asserts on it). It mirrors finish_reason; the

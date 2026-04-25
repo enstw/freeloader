@@ -127,4 +127,4 @@ async def test_normal_completion_under_timeout_unaffected():
         pass
 
     assert events.events[0]["state"] == "complete"
-    assert router._bindings["conv-fast"] == "ok-sid"
+    assert router._bindings["conv-fast"] == ("claude", "ok-sid")
