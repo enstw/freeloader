@@ -142,12 +142,6 @@ class CodexAdapter:
         turn_id = uuid.uuid4().hex[:8]
         return self.data_dir / "scratch" / session_id / turn_id
 
-    def _state_dir_for(self, conversation_id: str) -> Path:
-        # PLAN decision #16: each subprocess gets a per-conversation
-        # state root via CODEX_HOME. Without isolation, codex's session
-        # store under ~/.codex/ would mix threads across conversations.
-        return self.data_dir / "cli-state" / conversation_id / "codex"
-
     async def send(
         self,
         prompt: str,
@@ -158,8 +152,6 @@ class CodexAdapter:
     ) -> AsyncIterator[Delta]:
         scratch = self._scratch_for(session_id)
         scratch.mkdir(parents=True, exist_ok=True)
-        state_dir = self._state_dir_for(conversation_id)
-        state_dir.mkdir(parents=True, exist_ok=True)
         if resume_session_id:
             # Resume: codex exec resume <thread_id> <prompt>. Sandbox
             # flag is rejected on resume — the original session's
@@ -188,10 +180,17 @@ class CodexAdapter:
                 prompt,
             ]
 
-        # Merge with os.environ so OAuth credentials and PATH inherit;
-        # only override the state-dir slot. Replacing env entirely would
-        # strip the user's auth and break CLI invocation.
-        child_env = {**os.environ, "CODEX_HOME": str(state_dir)}
+        # Inherit env unchanged. PLAN decision #16 originally redirected
+        # CODEX_HOME per-conversation for state isolation, on the
+        # assumption that OAuth would still resolve from user-global state.
+        # In vivo (verified 2026-04-25 alongside the analogous claude
+        # finding) that assumption fails: codex looks for OAuth under
+        # $CODEX_HOME, so redirecting strips auth and the CLI returns
+        # 401 Unauthorized. Concurrent-turn race on ~/.codex/ is mitigated
+        # by codex's server-assigned thread_id keying — `exec resume
+        # <thread_id>` finds the right thread regardless of which other
+        # conversations have written to the same store.
+        child_env = os.environ.copy()
 
         proc = None
         try:

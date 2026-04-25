@@ -1,15 +1,17 @@
-# Decision #16: each codex subprocess runs with CODEX_HOME redirected
-# to <data_dir>/cli-state/<conversation_id>/codex/. Without isolation,
-# `codex exec resume` could resolve to whichever thread was last
-# written by *any* conversation.
+# Originally written to lock in PLAN decision #16's per-conversation
+# CODEX_HOME redirection. Reverted 2026-04-25 alongside the analogous
+# claude finding: codex reads OAuth from $CODEX_HOME, so redirecting
+# strips auth and the CLI returns 401 Unauthorized. This file now guards
+# the OPPOSITE invariant: codex must inherit the user's environment
+# unchanged so OAuth from `codex login` resolves correctly.
 #
-# Verified by monkey-patching asyncio.create_subprocess_exec; no live
-# codex. Mirror of test_claude_state_isolation.py.
+# Concurrent-turn race on the user-global ~/.codex/ store is mitigated
+# by codex's server-assigned thread_id keying — `exec resume <thread_id>`
+# finds the right thread regardless of cross-conversation writes.
 from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 
 import pytest
 
@@ -54,7 +56,11 @@ def captured_spawn(monkeypatch):
     return captured
 
 
-async def test_codex_home_points_at_per_conversation_state(tmp_path, captured_spawn):
+async def test_codex_home_is_NOT_redirected(tmp_path, captured_spawn):
+    # Regression: redirecting CODEX_HOME per-conversation strips OAuth
+    # (codex reads its credentials from $CODEX_HOME). Adapter must NOT
+    # touch CODEX_HOME — auth resolves from the user's global ~/.codex/
+    # via the un-overridden default.
     adapter = CodexAdapter(data_dir=tmp_path)
     _ = [
         d
@@ -63,16 +69,14 @@ async def test_codex_home_points_at_per_conversation_state(tmp_path, captured_sp
 
     env = captured_spawn["env"]
     assert env is not None, "subprocess must run with explicit env"
-    expected = tmp_path / "cli-state" / "conv-A" / "codex"
-    assert env["CODEX_HOME"] == str(expected)
-    assert expected.is_dir()
+    assert env.get("CODEX_HOME") == os.environ.get("CODEX_HOME")
 
 
-async def test_two_conversations_get_separate_codex_homes(tmp_path, monkeypatch):
-    seen: list[dict] = []
+async def test_two_conversations_share_user_global_codex_state(tmp_path, monkeypatch):
+    seen_envs: list[dict] = []
 
     async def fake_exec(*argv, cwd=None, env=None, **kwargs):
-        seen.append(env)
+        seen_envs.append(env)
         return _FakeProc()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
@@ -81,14 +85,10 @@ async def test_two_conversations_get_separate_codex_homes(tmp_path, monkeypatch)
     _ = [d async for d in adapter.send("hi", conversation_id="conv-X", session_id="s1")]
     _ = [d async for d in adapter.send("hi", conversation_id="conv-Y", session_id="s2")]
 
-    assert seen[0]["CODEX_HOME"] == str(tmp_path / "cli-state" / "conv-X" / "codex")
-    assert seen[1]["CODEX_HOME"] == str(tmp_path / "cli-state" / "conv-Y" / "codex")
-    assert seen[0]["CODEX_HOME"] != seen[1]["CODEX_HOME"]
+    assert seen_envs[0].get("CODEX_HOME") == seen_envs[1].get("CODEX_HOME")
 
 
-async def test_env_merge_keeps_oauth_relevant_inherited_vars(
-    tmp_path, captured_spawn, monkeypatch
-):
+async def test_env_inherits_oauth_relevant_vars(tmp_path, captured_spawn, monkeypatch):
     monkeypatch.setenv("FREELOADER_TEST_INHERITED", "still-here")
 
     adapter = CodexAdapter(data_dir=tmp_path)
@@ -97,18 +97,15 @@ async def test_env_merge_keeps_oauth_relevant_inherited_vars(
     env = captured_spawn["env"]
     assert env["FREELOADER_TEST_INHERITED"] == "still-here"
     assert env.get("PATH") == os.environ.get("PATH")
-    assert env["CODEX_HOME"] == str(tmp_path / "cli-state" / "conv-Z" / "codex")
+    assert env.get("HOME") == os.environ.get("HOME")
 
 
-async def test_resume_call_uses_same_codex_home_as_first_turn(tmp_path, monkeypatch):
-    """`codex exec resume` reads its session store from CODEX_HOME; if
-    turn 2 used a different CODEX_HOME than turn 1, resume would fail
-    to find the thread."""
-    seen_homes: list[str] = []
+async def test_resume_argv_shape_unchanged(tmp_path, monkeypatch):
+    """Sanity: the env change does not affect the resume-vs-first-turn argv
+    shape (the load-bearing invariant for codex thread continuation)."""
     seen_argvs: list[list[str]] = []
 
     async def fake_exec(*argv, cwd=None, env=None, **kwargs):
-        seen_homes.append(env["CODEX_HOME"])
         seen_argvs.append(list(argv))
         return _FakeProc()
 
@@ -131,13 +128,5 @@ async def test_resume_call_uses_same_codex_home_as_first_turn(tmp_path, monkeypa
         )
     ]
 
-    assert (
-        seen_homes[0]
-        == seen_homes[1]
-        == str(tmp_path / "cli-state" / "conv-stable" / "codex")
-    )
-    assert Path(seen_homes[0]).is_dir()
-
-    # Sanity: turn 2 used the resume verb, turn 1 did not.
     assert "resume" not in seen_argvs[0]
     assert "resume" in seen_argvs[1]
