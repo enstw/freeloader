@@ -1,110 +1,134 @@
 # FreelOAder status — 2026-04-25
 
 ## Phase: 4/5 — quota tracking + threshold switching
-## Step: 4.5 — deterministic routing replay over fixture JOURNAL
+## Step: 4.4 — thresholds come from freeloader.toml
 
 Purpose (why this step exists):
-  Step 4.3 built `QuotaAwareStrategy` with no clock dependency
-  precisely so this step could prove replay determinism: given a
-  fixture `JOURNAL.jsonl`, the strategy produces the same routing
-  decisions every time. That's the foundation for offline analysis
-  ("what would the router have done given that history?") and the
-  durable safety check for any future strategy refinement — if a
-  later change to pressure-folding accidentally introduces clock
-  reads or randomness, this test fails.
+  Step 4.2a introduced two placeholder constants in
+  `src/freeloader/router.py` (`INFERENCE_WINDOW_SECONDS=300`,
+  `INFERENCE_TOKENS_THRESHOLD=1_000_000`) with the comment "4.4 moves
+  these to freeloader.toml (PLAN decision #10)." This step removes
+  that "operator must edit Python source" anti-pattern: thresholds
+  become declarative, sit in a config file, and survive a
+  re-install. The Router constructor already accepts the values via
+  kwargs (router.py:76-77) — 4.4 only changes *where the values come
+  from* before construction. It also closes the last red square in
+  `gate_4.sh` so phase 4 can advance.
 
-  ROADMAP § Phase 4: "Replay test: given a fixture JOURNAL, the
-  router makes deterministic routing decisions — no wall-clock
-  dependency."
+  ROADMAP § Phase 4: "Thresholds and weights come from
+  `freeloader.toml`."
 
-Why this is 4.5, not 4.4:
-  4.4 (`freeloader.toml` thresholds) doesn't yet exist; the
-  inference threshold is still a placeholder constant. But the
-  Strategy doesn't read thresholds — it consumes pre-computed
-  status from quota_signal events. So replay determinism is
-  testable today without 4.4. Building 4.5 first proves the seam
-  is clean before config introduces a new failure mode.
+Scope clarification — "thresholds and weights":
+  ROADMAP says "thresholds and weights." Only thresholds exist as a
+  concept today; `QuotaAwareStrategy` has no weight notion (it's a
+  cursor-rotating skip-if-pressured picker). Configuring a thing
+  that doesn't exist is wrong order — weights wait until weighted
+  strategy lands. 4.4 ships thresholds only.
 
 Design (one sentence per file):
-  - `tests/core/fixtures/routing_replay/realistic_session.jsonl` —
-    a hand-crafted JOURNAL of mixed `quota_signal` and `turn_done`
-    records: claude five_hour goes allowed → exceeded → allowed,
-    codex inferred_window goes allowed → exceeded, gemini stays
-    allowed throughout. Byte-shape matches what `build_quota_signal`
-    / `build_quota_signal_from_usage` actually produce so a future
-    canonical-shape change breaks this fixture (a desirable forcing
-    function — replay must consume the real shape).
-  - `tests/core/fixtures/routing_replay/all_pressured.jsonl` —
-    every provider exceeded simultaneously; exercises the
-    "deterministic fallback" path (PLAN principle #5: signal not
-    gate; never refuse service).
-  - `tests/core/test_routing_replay.py` — loads each fixture
-    line-by-line, replays through a fresh `QuotaAwareStrategy`
-    via `observe(event)`, and asserts:
-      * documented checkpoint decisions (after replaying records
-        [0..N], `pick(order)` returns provider X)
-      * idempotence — the same fixture replayed twice with two
-        fresh strategies produces identical decision sequences
-      * non-quota events ignored — feeding the same fixture with
-        all `turn_done` records stripped produces equivalent
-        strategy state
-      * real-builder shape — events synthesized via the canonical
-        builders are valid replay input (catches drift if
-        `build_quota_signal*` shape ever diverges from the JSONL
-        consumer)
+  - `src/freeloader/config.py` — add `load_router_config()` returning
+    a dict of Router kwargs. Resolution order:
+      1. `FREELOADER_CONFIG` env var (explicit override; fail loud
+         if the path is set but unreadable)
+      1. `$cwd/freeloader.toml` (project-local config)
+      1. `<data_dir>/freeloader.toml` (user-global, via the existing
+         `resolve_data_dir()`)
+      1. built-in defaults matching the placeholder constants
+    Uses stdlib `tomllib` (Python 3.11+, no new dep). Malformed toml
+    → raises `RouterConfigError` with the source path. A typo
+    silently using defaults is exactly the bug-class config files
+    are supposed to prevent.
+  - `src/freeloader/router.py` — delete the
+    `INFERENCE_WINDOW_SECONDS` / `INFERENCE_TOKENS_THRESHOLD`
+    module-level constants; defaults move into `load_router_config()`
+    so there's a single source of truth. Router constructor
+    signature unchanged (kwargs still default to `None` and the
+    instance still keeps a `_inference_window_seconds` /
+    `_inference_tokens_threshold` field — tests inject their own).
+  - `src/freeloader/frontend/app.py:76` — change
+    `r = router or Router()` to
+    `r = router or Router(**load_router_config())` so the running
+    server picks up the toml.
+  - `tests/core/test_config_thresholds.py` (NEW, the file gate_4
+    looks for) covers:
+      * defaults returned when no toml present and no env override
+      * `FREELOADER_CONFIG` pointing at a temp toml — values land
+      * partial toml (only one of the two keys set) — other key
+        falls back to default
+      * malformed toml → raises with a clear message
+      * `FREELOADER_CONFIG` set to a missing path → raises (loud,
+        not silent fallback to defaults — explicit override means
+        the operator wanted those values)
+      * `$cwd/freeloader.toml` is preferred over `<data_dir>` when
+        both exist
+      * integration: `create_app()` constructs a Router whose
+        `_inference_window_seconds` / `_inference_tokens_threshold`
+        match values read from `$cwd/freeloader.toml`
 
-Why fixture FILES (not inline literals):
-  ROADMAP says "fixture JOURNAL." A real `.jsonl` file proves the
-  consumer doesn't depend on Python object identity — it parses
-  bytes the same way the production journal would be re-read. If
-  this test passed with inline dicts but failed with bytes, we'd
-  have a silent gap.
+Schema (flat — single section, no per-provider override):
+  ```toml
+  [router]
+  inference_window_seconds = 300
+  inference_tokens_threshold = 1_000_000
+  ```
+  Single window+threshold applied to all inferred providers (codex,
+  gemini). Per-provider overrides are deferred — PLAN doesn't ask
+  for them; adding now would be premature.
 
-Why NOT through the Router:
-  4.3's integration tests already cover Router→Strategy wiring.
-  4.5's claim is purely about strategy replay determinism. Going
-  through Router would re-test what 4.3 verified and add adapter
-  scaffolding noise. Pure-strategy replay is the right scope.
+Why fail-loud on malformed toml (not silent default):
+  A typo in `freeloader.toml` silently using defaults would be
+  exactly the bug where you spend an hour wondering why your
+  threshold change had no effect. This config file's whole job is
+  to be a knob the operator turns; if the knob is jammed, fail
+  visibly. (Same reasoning as 4.1 — surface the surprising state.)
 
-Exit criteria for step 4.5:
-  - [ ] `tests/core/fixtures/routing_replay/realistic_session.jsonl`
-        and `tests/core/fixtures/routing_replay/all_pressured.jsonl`
-        exist, valid JSONL, each record matches the canonical
-        `quota_signal` shape (or a `turn_done`-style filler).
-  - [ ] `tests/core/test_routing_replay.py` covers:
-          * documented checkpoint decisions for both fixtures
-          * idempotence: two fresh strategies, same fixture →
-            identical pick() sequences
-          * non-quota records ignored: stripped vs full fixture
-            yield equivalent state
-          * real-builder shape: events from `build_quota_signal` /
-            `build_quota_signal_from_usage` are valid input
-  - [ ] All existing tests still green (207 → ~213 expected).
+Why not load config in `Router.__init__`:
+  The Router doesn't know its config source; that's the caller's
+  job (production = `frontend/app.py`, tests = explicit kwargs).
+  Pushing toml-loading into the constructor would force every test
+  to either tolerate or stub a filesystem read. Keep the seam at
+  the call site.
+
+Exit criteria for step 4.4:
+  - [ ] `src/freeloader/config.py` has `load_router_config()` with
+        the resolution order above, returns a dict suitable for
+        `Router(**...)`, raises `RouterConfigError` (or stdlib
+        equivalent) on malformed toml or missing `FREELOADER_CONFIG`
+        path.
+  - [ ] `src/freeloader/router.py` no longer defines
+        `INFERENCE_WINDOW_SECONDS` / `INFERENCE_TOKENS_THRESHOLD`
+        as module-level constants; defaults live in `config.py`.
+  - [ ] `src/freeloader/frontend/app.py` calls
+        `load_router_config()` when constructing the default
+        Router.
+  - [ ] `tests/core/test_config_thresholds.py` covers all six
+        cases listed in Design.
+  - [ ] All existing tests still green (218 → ~225 expected).
   - [ ] ruff check + ruff format clean.
-  - [ ] gate_4.sh's "deterministic routing replay over fixture
-        JOURNAL" check passes (file existence — does not
-        introspect contents).
+  - [ ] `gate_4.sh` fully GREEN (closes the last red square,
+        unblocks `phase_done` for phase 4).
 
-Out of scope for 4.5 (deferred):
-  - Binding replay (rebuild conversation→provider bindings from
-    `turn_done` records). Separate concern; not required by
-    gate_4. Could be a future step if cold-start needs to
-    reconstitute bindings.
-  - Wall-clock decay / `resets_at` consultation — explicitly
-    excluded from 4.3, still excluded.
-  - 4.4 (`freeloader.toml` thresholds) — Strategy doesn't read
-    thresholds; 4.4 lands separately.
-  - 4.2b (gemini/codex 429 detection) — adapter stderr work.
-    When 4.2b lands and emits `quota_signal` records, replay
-    will consume them transparently — no test change needed.
+Out of scope for 4.4 (deferred):
+  - Per-provider threshold overrides (`[router.codex]
+    inference_tokens_threshold = ...`). PLAN doesn't ask; codex and
+    gemini share one threshold today. Trivially additive later.
+  - Strategy weights — no weight concept exists in
+    `QuotaAwareStrategy`. Lands with weighted strategy if/when.
+  - Adapter list / model-name routing config from PLAN.md line 674.
+    Separate config surface, not what gate_4 checks.
+  - Runtime config reload — PLAN.md line 677 explicitly: "No
+    runtime config reloading in the MVP."
+  - 4.2b (gemini/codex 429 detection) — independent; can land
+    after phase 4.
 
 Phase 4 sketch:
   - 4.1 claude rate_limit_event → quota_signal events ✅
   - 4.2a gemini/codex token-window inference ✅
-  - 4.2b gemini/codex 429 detection (adapter stderr work) — TODO
+  - 4.2b gemini/codex 429 detection (adapter stderr work) — deferred
+    past phase 4 (additive; consumed transparently by 4.3 + 4.5)
   - 4.3 Quota-aware Strategy reading the derived view ✅
-  - 4.4 Threshold + weight config in freeloader.toml — TODO
-  - 4.5 Replay test (this step).
+  - 4.4 Threshold config in freeloader.toml (this step).
+  - 4.5 Replay test ✅
 
 Recent lessons (see JOURNAL.jsonl for full text):
   - claude -p exits 0 on rate_limit; inspect events
@@ -130,3 +154,7 @@ Recent lessons (see JOURNAL.jsonl for full text):
   - 4.3 Strategy.observe(event) is fed only after a successful
     journal write — keeps strategy view aligned with the durable
     record so a restart that re-reads JOURNAL gives the same state
+  - 4.5 fixture FILES (not inline literals) prove the replay
+    consumer parses bytes the same way the production journal
+    would be re-read; canonical-builder shape drift breaks replay
+    loud (a desirable forcing function)
