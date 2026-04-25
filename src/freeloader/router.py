@@ -371,6 +371,31 @@ class Router:
             # doesn't auto-close on exception.
             await adapter_gen.aclose()
 
+    def _notify_strategy(self, event: dict) -> None:
+        """Step 4.3: feed a successfully-written quota_signal to the
+        active selection strategy. Duck-typed so RoundRobinStrategy
+        (which has no `observe`) keeps working unchanged. Only called
+        after a successful journal write so the strategy's view never
+        diverges from the durable record."""
+        observe = getattr(self._strategy, "observe", None)
+        if observe is None:
+            return
+        try:
+            observe(event)
+        except Exception as exc:
+            # Strategy state degraded; routing falls back to whatever
+            # the strategy can do without this event. Same forensic-
+            # gap-not-turn-failure rule as the journal-write paths.
+            logger.error(
+                "strategy.observe failed; routing state may be stale",
+                extra={
+                    "provider": event.get("provider"),
+                    "rate_limit_type": event.get("rate_limit_type"),
+                    "status": event.get("status"),
+                    "error": str(exc),
+                },
+            )
+
     def _emit_inferred_quota_signal(
         self,
         *,
@@ -422,6 +447,8 @@ class Router:
                     "error": str(exc),
                 },
             )
+            return
+        self._notify_strategy(event)
 
     def _emit_quota_signal(
         self,
@@ -453,6 +480,8 @@ class Router:
                     "error": str(exc),
                 },
             )
+            return
+        self._notify_strategy(event)
 
     def _record_terminal(
         self,
