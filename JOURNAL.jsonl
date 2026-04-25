@@ -113,3 +113,4 @@
 {"ts": "2026-04-25T03:43:57Z", "kind": "step_done", "text": "3.4", "phase": "3", "step": "3.4", "subject": "round_robin_router"}
 {"ts": "2026-04-25T03:44:02Z", "kind": "decision", "text": "Router._bindings is now {conv_id -> (provider, backend_sid)} not bare backend_sid. Provider is recorded so a resumed turn dispatches to the same adapter that started the conversation; this is the load-bearing piece for 3.5 mid-conversation provider switch (which will compare bound-provider vs current-pool to detect a switch is needed).", "subject": "binding_shape", "why": "without provider in the binding, resume cannot find the right adapter when 2+ adapters are registered"}
 {"ts": "2026-04-25T03:45:20Z", "kind": "step_start", "text": "3.5", "phase": "3", "step": "3.5", "subject": "provider_switch_replay"}
+{"ts": "2026-04-25T03:47:09Z", "kind": "step_done", "text": "3.5", "phase": "3", "step": "3.5", "subject": "provider_switch_replay"}

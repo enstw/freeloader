@@ -85,11 +85,17 @@ class Router:
             if turn_timeout_seconds is not None
             else self.DEFAULT_TURN_TIMEOUT_SECONDS
         )
-        # {conversation_id → (provider_name, backend_session_id)}.
+        # {conversation_id → (provider_name, backend_session_id | None)}.
         # Provider is recorded so a resumed turn dispatches to the
-        # same adapter that started the conversation. In-memory for
-        # phase 3; durable storage is a later concern.
-        self._bindings: dict[str, tuple[str, str]] = {}
+        # same adapter that started the conversation. The session id
+        # is None in two cases:
+        #   - bind() was just called (provider switch): next dispatch
+        #     replays full history into the new backend, no resume;
+        #   - cancellation/timeout discards the binding entirely
+        #     (decision #5), in which case the entry is removed, not
+        #     stored as None.
+        # In-memory for phase 3; durable storage is a later concern.
+        self._bindings: dict[str, tuple[str, str | None]] = {}
 
     @property
     def claude(self) -> _Adapter | None:
@@ -108,6 +114,25 @@ class Router:
         self._next_provider_idx += 1
         return provider
 
+    def bind(self, conversation_id: str, new_provider: str) -> None:
+        """Pin `conversation_id` to `new_provider`. The next dispatch
+        replays the canonical history into the new backend's first
+        turn (PLAN principle #3). After that turn completes, the new
+        backend's session id is captured and subsequent turns resume
+        normally.
+
+        Idempotent only in the trivial case (binding already points
+        at this provider with a sid → re-pin to (provider, None) and
+        force a replay). Round-robin index is NOT advanced — bind()
+        is not a "new conversation" event.
+        """
+        if new_provider not in self._adapters:
+            raise ValueError(
+                f"unknown provider {new_provider!r}; "
+                f"registered: {sorted(self._adapters)}"
+            )
+        self._bindings[conversation_id] = (new_provider, None)
+
     async def dispatch(
         self,
         *,
@@ -118,18 +143,26 @@ class Router:
         turn = Turn()  # QUEUED
 
         binding = self._bindings.get(conversation_id)
-        if binding is not None:
-            provider, backend_sid = binding
-            # Resume: send only the new turn; the backend has the history.
-            prompt = _flatten_canonical(new_messages)
-            resume = backend_sid
-        else:
+        if binding is None:
+            # No binding: round-robin pick, full-history replay, no resume.
             provider = self._pick_next_provider()
             backend_sid = None
-            # First contact with this conversation's backend: replay full
-            # canonical history into the first turn (PLAN principle #3).
             prompt = _flatten_canonical(stored_messages + new_messages)
             resume = None
+        else:
+            provider, backend_sid = binding
+            if backend_sid is None:
+                # Pinned via bind() — provider switch in progress. Same
+                # shape as a first-contact turn: full-history replay,
+                # no resume. The new backend's sid will be observed and
+                # committed on completion.
+                prompt = _flatten_canonical(stored_messages + new_messages)
+                resume = None
+            else:
+                # Resume: send only the new turn; the backend has the
+                # history.
+                prompt = _flatten_canonical(new_messages)
+                resume = backend_sid
         session_id = backend_sid or str(uuid.uuid4())
 
         adapter = self._adapters[provider]
