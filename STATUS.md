@@ -1,144 +1,110 @@
 # FreelOAder status — 2026-04-25
 
 ## Phase: 4/5 — quota tracking + threshold switching
-## Step: 4.3 — quota-aware routing strategy
+## Step: 4.5 — deterministic routing replay over fixture JOURNAL
 
 Purpose (why this step exists):
-  Steps 4.1 and 4.2a built the *signal*: claude's native
-  `RateLimitDelta` and gemini/codex's inferred token-window pressure
-  both land on `events.jsonl` as `quota_signal` records sharing one
-  canonical shape (PLAN principle #5, decision #6). 4.3 makes the
-  router *act* on that signal — replace round-robin's blind cycling
-  with a strategy that skips pressured providers on first-turn
-  dispatch.
+  Step 4.3 built `QuotaAwareStrategy` with no clock dependency
+  precisely so this step could prove replay determinism: given a
+  fixture `JOURNAL.jsonl`, the strategy produces the same routing
+  decisions every time. That's the foundation for offline analysis
+  ("what would the router have done given that history?") and the
+  durable safety check for any future strategy refinement — if a
+  later change to pressure-folding accidentally introduces clock
+  reads or randomness, this test fails.
 
-  This is the payoff for phase 4: traffic actually shifts away from a
-  rate-limited backend instead of bouncing into it on every other
-  conversation.
+  ROADMAP § Phase 4: "Replay test: given a fixture JOURNAL, the
+  router makes deterministic routing decisions — no wall-clock
+  dependency."
+
+Why this is 4.5, not 4.4:
+  4.4 (`freeloader.toml` thresholds) doesn't yet exist; the
+  inference threshold is still a placeholder constant. But the
+  Strategy doesn't read thresholds — it consumes pre-computed
+  status from quota_signal events. So replay determinism is
+  testable today without 4.4. Building 4.5 first proves the seam
+  is clean before config introduces a new failure mode.
 
 Design (one sentence per file):
-  - `src/freeloader/core/routing/quota_aware.py` — new
-    `QuotaAwareStrategy` with `pick(order) -> str` (same shape as
-    `RoundRobinStrategy`, so Router stays strategy-agnostic) plus a
-    new `observe(event: dict) -> None` hook fed by the Router every
-    time a `quota_signal` is written. State: per-provider, per-
-    `rate_limit_type`, the latest `status` seen. "Pressured" = ANY
-    `rate_limit_type`'s latest status == `"exceeded"`. `pick()` scans
-    `order` left-to-right and returns the first non-pressured
-    provider; if all are pressured, returns the first in `order` —
-    deterministic fallback, no starvation (the user wants service
-    even under universal pressure; the journal records the breach).
-  - `src/freeloader/core/routing/__init__.py` — export
-    `QuotaAwareStrategy` alongside `RoundRobinStrategy`.
-  - `src/freeloader/router.py` — after every successful
-    `self.events.write(event)` for a `quota_signal` (both native via
-    `_emit_quota_signal` and inferred via
-    `_emit_inferred_quota_signal`), call
-    `self._strategy.observe(event)` if `hasattr(self._strategy,
-    "observe")`. Duck-typed so `RoundRobinStrategy` (no `observe`)
-    keeps working unchanged. NO change to Router signature, NO
-    change to `pick(order)` interface.
-  - `tests/core/test_routing_quota_aware.py` — strategy unit tests
-    (pure: feed events via `observe()`, assert on `pick()`) +
-    integration tests through `Router` with `_ScriptedAdapter`
-    (claude RateLimitDelta exceeded → next fresh conversation skips
-    claude, etc.).
+  - `tests/core/fixtures/routing_replay/realistic_session.jsonl` —
+    a hand-crafted JOURNAL of mixed `quota_signal` and `turn_done`
+    records: claude five_hour goes allowed → exceeded → allowed,
+    codex inferred_window goes allowed → exceeded, gemini stays
+    allowed throughout. Byte-shape matches what `build_quota_signal`
+    / `build_quota_signal_from_usage` actually produce so a future
+    canonical-shape change breaks this fixture (a desirable forcing
+    function — replay must consume the real shape).
+  - `tests/core/fixtures/routing_replay/all_pressured.jsonl` —
+    every provider exceeded simultaneously; exercises the
+    "deterministic fallback" path (PLAN principle #5: signal not
+    gate; never refuse service).
+  - `tests/core/test_routing_replay.py` — loads each fixture
+    line-by-line, replays through a fresh `QuotaAwareStrategy`
+    via `observe(event)`, and asserts:
+      * documented checkpoint decisions (after replaying records
+        [0..N], `pick(order)` returns provider X)
+      * idempotence — the same fixture replayed twice with two
+        fresh strategies produces identical decision sequences
+      * non-quota events ignored — feeding the same fixture with
+        all `turn_done` records stripped produces equivalent
+        strategy state
+      * real-builder shape — events synthesized via the canonical
+        builders are valid replay input (catches drift if
+        `build_quota_signal*` shape ever diverges from the JSONL
+        consumer)
 
-Why no wall-clock decay:
-  - 4.5's replay test wants "fixture JOURNAL → exact same routing
-    decisions". A `resets_at` comparison against `now()` couples the
-    strategy to wall-clock and breaks replay determinism.
-  - Pressure clears only when a later `allowed` event arrives for
-    the same `rate_limit_type`. For the inferred path this is
-    automatic — every UsageDelta produces a new windowed status. For
-    claude it requires the next turn (or background poll) to surface
-    a fresh `rate_limit_event`, which matches how claude actually
-    publishes it today.
-  - Decay/forecasting can be a 4.5+ refinement once the replay
-    harness proves the deterministic path works.
+Why fixture FILES (not inline literals):
+  ROADMAP says "fixture JOURNAL." A real `.jsonl` file proves the
+  consumer doesn't depend on Python object identity — it parses
+  bytes the same way the production journal would be re-read. If
+  this test passed with inline dicts but failed with bytes, we'd
+  have a silent gap.
 
-Why "all pressured → first in order" instead of "raise":
-  - PLAN principle #5 says quota is a signal, not a hard gate. The
-    user wants a response; the router's job is to pick the *least
-    bad* option, not to refuse service.
-  - "First in order" is the simplest deterministic tiebreaker.
-    Round-robin among pressured providers is also defensible but
-    adds state (a second cursor) for marginal benefit; revisit if
-    the breach pattern in practice argues for it.
+Why NOT through the Router:
+  4.3's integration tests already cover Router→Strategy wiring.
+  4.5's claim is purely about strategy replay determinism. Going
+  through Router would re-test what 4.3 verified and add adapter
+  scaffolding noise. Pure-strategy replay is the right scope.
 
-Why duck-typed `observe()`:
-  - Avoids forcing `RoundRobinStrategy` to grow a no-op method
-    (which would either be dead code or pretend to consume signals
-    it ignores). The Router's `hasattr` guard is one line; the cost
-    of a Protocol with `observe` is shared confusion about what
-    round-robin does with quota signals (answer: nothing, by design).
-  - `QuotaAwareStrategy.pick()` is still the same shape, so any
-    future strategy that wants to consume signals just adds the
-    method.
-
-Exit criteria for step 4.3:
-  - [ ] `src/freeloader/core/routing/quota_aware.py` exists with a
-        `QuotaAwareStrategy` class exposing `pick(order)` and
-        `observe(event)`. No clock dependency; pure event-stream
-        folding.
-  - [ ] `src/freeloader/core/routing/__init__.py` re-exports it
-        alongside `RoundRobinStrategy`.
-  - [ ] Router calls `self._strategy.observe(event)` after every
-        `quota_signal` write (both native and inferred), guarded by
-        `hasattr`. RoundRobinStrategy continues to work unchanged.
-  - [ ] `tests/core/test_routing_quota_aware.py` covers:
-          * strategy unit: all allowed → cycles like round-robin
-            (NOT a strict equality — "no provider is unfairly
-            avoided" is enough; pick() picks the first in order
-            when none are pressured)
-          * strategy unit: claude exceeded → pick skips claude,
-            picks codex (or next non-pressured)
-          * strategy unit: codex `inferred_window` exceeded → pick
-            skips codex
-          * strategy unit: ALL pressured → pick returns first in
-            order (deterministic fallback, no starvation)
-          * strategy unit: recovery — exceeded then later allowed
-            for same rate_limit_type → provider is selectable again
-          * strategy unit: claude five_hour exceeded but seven_day
-            allowed → still pressured (any-rule)
-          * Router integration: scripted claude RateLimitDelta
-            exceeded on conv-A → next fresh conv-B dispatches to
-            codex, NOT claude
-          * Router integration: bound conversation continues on
-            its bound provider regardless of pressure (binding
-            wins over strategy)
-          * Router integration: RoundRobinStrategy default keeps
-            working — no AttributeError on `observe`
-  - [ ] All existing tests still green (191 → ~201 expected).
+Exit criteria for step 4.5:
+  - [ ] `tests/core/fixtures/routing_replay/realistic_session.jsonl`
+        and `tests/core/fixtures/routing_replay/all_pressured.jsonl`
+        exist, valid JSONL, each record matches the canonical
+        `quota_signal` shape (or a `turn_done`-style filler).
+  - [ ] `tests/core/test_routing_replay.py` covers:
+          * documented checkpoint decisions for both fixtures
+          * idempotence: two fresh strategies, same fixture →
+            identical pick() sequences
+          * non-quota records ignored: stripped vs full fixture
+            yield equivalent state
+          * real-builder shape: events from `build_quota_signal` /
+            `build_quota_signal_from_usage` are valid input
+  - [ ] All existing tests still green (207 → ~213 expected).
   - [ ] ruff check + ruff format clean.
-  - [ ] gate_4.sh's "quota-aware routing strategy exists" check
-        passes (file existence — it does not introspect contents).
+  - [ ] gate_4.sh's "deterministic routing replay over fixture
+        JOURNAL" check passes (file existence — does not
+        introspect contents).
 
-Out of scope for 4.3 (deferred):
-  - 429 detection from codex/gemini (4.2b). The strategy will react
-    to those as soon as 4.2b emits `quota_signal` events with
-    status="exceeded" — no Strategy change needed when 4.2b lands.
-  - Wall-clock decay / `resets_at` forecasting — see "Why no
-    wall-clock decay" above.
-  - `freeloader.toml` thresholds — 4.4. The placeholder constants
-    in 4.2a stay; QuotaAwareStrategy doesn't read thresholds
-    (it consumes pre-computed status).
-  - Replay test that loads fixture JSONL — 4.5. The `observe(event)`
-    seam is exactly what 4.5 needs to feed events.
-  - Mid-conversation provider switch driven by pressure (currently
-    only manual via `Router.bind()`). Triggering a bind() from a
-    `quota_signal` mid-conversation is a separate concern — the
-    user might be mid-stream when claude flips to exceeded, and
-    deciding whether to interrupt vs let the current turn finish
-    is policy, not strategy. Defer.
+Out of scope for 4.5 (deferred):
+  - Binding replay (rebuild conversation→provider bindings from
+    `turn_done` records). Separate concern; not required by
+    gate_4. Could be a future step if cold-start needs to
+    reconstitute bindings.
+  - Wall-clock decay / `resets_at` consultation — explicitly
+    excluded from 4.3, still excluded.
+  - 4.4 (`freeloader.toml` thresholds) — Strategy doesn't read
+    thresholds; 4.4 lands separately.
+  - 4.2b (gemini/codex 429 detection) — adapter stderr work.
+    When 4.2b lands and emits `quota_signal` records, replay
+    will consume them transparently — no test change needed.
 
 Phase 4 sketch:
   - 4.1 claude rate_limit_event → quota_signal events ✅
   - 4.2a gemini/codex token-window inference ✅
-  - 4.2b gemini/codex 429 detection (adapter stderr work)
-  - 4.3 Quota-aware Strategy reading the derived view (this step).
-  - 4.4 Threshold + weight config in freeloader.toml.
-  - 4.5 Replay test: fixture JOURNAL → deterministic decisions.
+  - 4.2b gemini/codex 429 detection (adapter stderr work) — TODO
+  - 4.3 Quota-aware Strategy reading the derived view ✅
+  - 4.4 Threshold + weight config in freeloader.toml — TODO
+  - 4.5 Replay test (this step).
 
 Recent lessons (see JOURNAL.jsonl for full text):
   - claude -p exits 0 on rate_limit; inspect events
@@ -161,3 +127,6 @@ Recent lessons (see JOURNAL.jsonl for full text):
   - 4.2a inferred token-window pressure for codex/gemini; in-memory
     rolling window per provider; same canonical shape with
     rate_limit_type="inferred_window"
+  - 4.3 Strategy.observe(event) is fed only after a successful
+    journal write — keeps strategy view aligned with the durable
+    record so a restart that re-reads JOURNAL gives the same state
