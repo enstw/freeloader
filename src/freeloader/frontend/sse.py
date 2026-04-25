@@ -13,7 +13,10 @@ DONE_SENTINEL = b"data: [DONE]\n\n"
 
 
 def sse_encode(chunk: dict[str, Any]) -> bytes:
-    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
+    # Compact separators match OpenAI's actual wire bytes — SDK
+    # clients tolerate either form, but byte-level fixtures don't.
+    payload = json.dumps(chunk, ensure_ascii=False, separators=(",", ":"))
+    return f"data: {payload}\n\n".encode()
 
 
 def _envelope(chunk_id: str, created: int, model: str) -> dict[str, Any]:

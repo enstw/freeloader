@@ -1,69 +1,58 @@
 # FreelOAder status — 2026-04-25
 
-## Phase: 2/5 — streaming + cancellation
-## Step: 2.5 — SSE byte-diff vs OpenAI reference (last gate-2 check)
-## Task: capture a small fixture of the *exact* byte sequence an
-         OpenAI chat.completion stream emits (chunk envelopes,
-         finish chunk, usage chunk, [DONE]). Drive a mock-adapter
-         dispatch through the FreelOAder streaming path and assert
-         our wire bytes match the fixture modulo the volatile
-         fields (id, created). This pins the SSE shape so
-         OpenAI-SDK clients (which are strict about chunk shape)
-         keep working when phase-3 adapters land.
+## Phase: 2/5 — streaming + cancellation  ✅ GATE GREEN
+## Next phase: 3/5 — CodexAdapter + GeminiAdapter + round-robin
+## Step: 3.1 — CodexAdapter (codex first, then gemini per ROADMAP)
+## Task: implement src/freeloader/adapters/codex.py: shell out via
+         `codex exec` with `--json`, parse the {thread.started,
+         turn.started, item.completed, turn.completed} event stream,
+         emit canonical Deltas, capture the server-assigned
+         `thread_id` as the backend session id, resume subsequent
+         turns via `codex exec resume <thread_id>` (decision #16).
 
 Purpose (why this step exists):
-  Step 2.1 made stream=true work; tests there assert chunk
-  *structure*. The byte-level contract — exact envelope keys,
-  exact chunk separator (`\n\n`), exact terminator (`data: [DONE]
-  \n\n`), and the "empty choices array on usage chunk" quirk — is
-  what OpenAI-SDK clients depend on. A semantic match isn't
-  enough; the bytes have to line up. This is also where the gate
-  catches regressions when phase-3 adapters force changes to the
-  streaming path.
+  Phase 2 closed the streaming + cancellation story for one
+  backend. Phase 3 flushes out the `CLIAdapter` Protocol boundaries
+  by adding a *second* concrete adapter. Codex is structurally
+  closest to claude (clean JSONL stream, server-assigned thread_id,
+  one model per turn), so it surfaces what pluralizing the Protocol
+  costs without gemini's compound-provider quirk landing on top.
 
-Step 2.4 recap (closed):
-  - Router gained `turn_timeout_seconds` (default 300.0, override
-    via constructor arg). PLAN decision #8.
-  - dispatch loop now wraps adapter iteration with
-    `async with asyncio.timeout(self.turn_timeout_seconds)`. On
-    deadline, asyncio raises CancelledError into our await; the
-    timeout context converts it to TimeoutError, which we catch
-    and use to drive turn → timed_out, journal it, and return
-    cleanly so the SSE consumer sees end-of-stream.
-  - Forcibly-killed turns (timed_out, like cancelled in 2.3) do
-    NOT bind their backend session id — the next turn starts
-    fresh with full history replay (PLAN decision #5 logic).
-  - tests/core/test_turn_timeout.py: hung adapter terminates in
-    <1s under 0.1s timeout; default-cap constant assertion;
-    fast-turn sanity check that the timeout doesn't perturb the
-    happy path.
-  - 87/87 tests green; gate_2 phase-specific 5/6.
+Phase 2 recap (closed, 17/17 gate checks green):
+  - Step 2.1 SSE streaming for /v1/chat/completions ✅
+  - Step 2.2 turn state machine + journal-write-failure logging ✅
+  - Step 2.3 disconnect → SIGTERM, 50-cycle no-zombie test, decision
+    #5 (discard backend session id on cancel) ✅
+  - Step 2.4 5-minute hard timeout via asyncio.timeout, decision #8 ✅
+  - Step 2.5 SSE byte-diff vs OpenAI reference (caught a real
+    json.dumps separators divergence; fixed in sse_encode) ✅
+  - 91/91 tests passing.
 
-Phase 2 remaining steps:
-  - Step 2.5 — SSE byte-diff (this step). Last gate-2 check.
+Entry criteria for phase 3 (met):
+  - [x] Gate 2 GREEN; 91/91 tests passing
+  - [x] All phase 2 artifacts shipped
+  - [ ] phase_done entry in JOURNAL.jsonl with phase-close commit sha
+        (next step: scripts/advance.sh)
 
-Exit criteria (for step 2.5):
-  - [ ] tests/frontend/test_sse_shape.py exists and is green.
-  - [ ] A reference fixture of expected SSE bytes is checked into
-        the test (or generated from a documented OpenAI chunk shape
-        + golden id/created substitution).
-  - [ ] The test drives a TestClient through stream=true with a
-        scripted adapter and asserts the response body matches the
-        reference modulo id / created / model fields (substituted
-        out before diff).
-  - [ ] Existing 87 tests stay green.
+Phase 1 + 2 still-untested slice (carried into phase 3):
+  - Live `claude -p` subprocess exercise. Every test so far uses
+    fake adapters or monkey-patched asyncio.create_subprocess_exec.
+    Phase 3 should include an opt-in live-CLI smoke harness for
+    *both* claude and codex (gated behind an env flag so CI stays
+    offline). The `confirm_claude_model_usage_fields` lesson from
+    phase 1 + the `codex thread_id` shape from PLAN decision #16
+    both want empirical confirmation.
 
-Phase 2 close (after 2.5):
-  - Run scripts/gate_2.sh — must be GREEN (all 6 phase-2 checks
-    plus all 11 cross-phase invariants).
-  - Run the live-claude smoke test (carried-forward from phase 1)
-    if feasible before advancing — it sanity-checks the entire
-    chain end-to-end with a real subprocess. If the test discovers
-    drift in the modelUsage field shape, fix the adapter mapper
-    and add a JOURNAL lesson.
-  - scripts/advance.sh advances to phase 3.
-
-Blockers: none.
+Phase 3 sketch (from ROADMAP.md):
+  - 3.1 CodexAdapter (this step).
+  - 3.2 Per-conversation CLI state isolation env vars (decision
+    #16): CODEX_HOME / CLAUDE_CONFIG_DIR / XDG_*_HOME.
+  - 3.3 GeminiAdapter — compound provider, stats.models per turn.
+  - 3.4 Round-robin Router (cycles providers per new conversation).
+  - 3.5 Provider-switch mid-conversation: bind() rewires + replays
+    canonical history into the new backend.
+  - 3.6 /v1/models advertises freeloader/{auto,claude,codex,gemini}.
+  - 3.7 Same contract test suite runs green against all three.
 
 Recent lessons to keep in mind (see JOURNAL.jsonl for full text):
   - claude -p exits 0 even on rate_limit; inspect events, not exit code
@@ -72,6 +61,8 @@ Recent lessons to keep in mind (see JOURNAL.jsonl for full text):
   - gemini is a compound provider (stats.models per turn)
   - three session id shapes; adapter normalizes to opaque string
   - claude modelUsage field names still spike-observed; confirm with
-    a live-claude smoke test before phase 2 ships
+    a live-claude smoke test before phase 3 closes
   - Starlette StreamingResponse aclose() injects GeneratorExit, not
     asyncio.CancelledError; both must be handled identically
+  - json.dumps default separators are `, ` and `: `; OpenAI's wire
+    bytes use compact `,` `:` — sse_encode pins this (2.5)
