@@ -115,3 +115,4 @@
 {"ts": "2026-04-25T03:45:20Z", "kind": "step_start", "text": "3.5", "phase": "3", "step": "3.5", "subject": "provider_switch_replay"}
 {"ts": "2026-04-25T03:47:09Z", "kind": "step_done", "text": "3.5", "phase": "3", "step": "3.5", "subject": "provider_switch_replay"}
 {"ts": "2026-04-25T03:48:35Z", "kind": "step_start", "text": "3.6", "phase": "3", "step": "3.6", "subject": "models_endpoint"}
+{"ts": "2026-04-25T03:49:32Z", "kind": "step_done", "text": "3.6", "phase": "3", "step": "3.6", "subject": "models_endpoint"}

@@ -76,6 +76,32 @@ def create_app(
     r = router or Router()
     s = store or default_store()
 
+    @app.get("/v1/models")
+    async def list_models() -> dict[str, Any]:
+        # OpenAI-shaped models discovery. One entry per registered
+        # adapter; freeloader/auto only when 2+ adapters exist (no
+        # choice = no auto). req.model is currently echoed in
+        # responses but does not steer routing — see STATUS.md
+        # 3.6 out-of-scope.
+        created = int(time.time())
+        provider_names = list(r._adapters.keys())
+        ids: list[str] = []
+        if len(provider_names) >= 2:
+            ids.append("freeloader/auto")
+        ids.extend(f"freeloader/{name}" for name in provider_names)
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": mid,
+                    "object": "model",
+                    "created": created,
+                    "owned_by": "freeloader",
+                }
+                for mid in ids
+            ],
+        }
+
     @app.post("/v1/chat/completions")
     async def chat_completions(
         req: ChatCompletionRequest,
