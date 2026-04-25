@@ -1,74 +1,75 @@
-# FreelOAder status — 2026-04-24
+# FreelOAder status — 2026-04-25
 
 ## Phase: 2/5 — streaming + cancellation
-## Step: 2.2 — turn state machine
-## Task: introduce src/freeloader/core/turn_state.py carrying the
-         explicit enum `queued/spawning/streaming/complete/cancelled/
-         backend_error/rate_limited/timed_out` plus the transition
-         table. Reaching any terminal state atomically writes a
-         runtime event (PLAN principle #2 — no separate "logged"
-         state). Router.dispatch becomes the machine's driver: it
-         owns the per-conversation mutex (decision #1) and records
-         the state transitions observed from the Delta stream.
+## Step: 2.3 — client disconnect → SIGTERM → SIGKILL
+## Task: when the HTTP client drops the SSE connection mid-stream,
+         FreelOAder must terminate the underlying claude subprocess
+         (SIGTERM, SIGKILL after 3s if still alive), drive the turn
+         state machine to `cancelled`, and discard the
+         backend_session_id captured during that turn (PLAN
+         decision #5 — resuming via a poisoned session id causes
+         permanent state drift). Stress test: 50 sequential drops
+         leaves zero zombie `claude` processes.
 
 Purpose (why this step exists):
-  Step 2.1 shipped SSE streaming; clients now see tokens live. The
-  hard problem in phase 2 is lifecycle, not parsing — a dropped
-  client must not leak a CLI subprocess, a timed-out turn must not
-  pretend to still be streaming, a rate_limit_event must not race
-  with a router retry. The state machine gives the remaining phase-2
-  steps (2.3 disconnect, 2.4 timeout, 2.5 byte-diff contract) one
-  place to reason about those transitions instead of scattering
-  boolean flags across app.py / router.py / adapter.
+  The SSE plumbing from 2.1 + state machine from 2.2 are the easy
+  half of phase 2. The hard half is lifecycle: a client that hits
+  Ctrl-C in cursor / aider must not leave a `claude` process
+  burning quota in the background. Without this step, FreelOAder
+  silently degrades over time as orphaned subprocesses accumulate.
 
-Step 2.1 recap (closed):
-  - src/freeloader/frontend/sse.py — OpenAI chat.completion.chunk
-    formatters (role / text / finish / usage + sse_encode +
-    DONE_SENTINEL).
-  - frontend/app.py branches on req.stream: stream=true returns a
-    StreamingResponse whose generator consumes router.dispatch and
-    emits role → N×text → finish → (usage) → [DONE].
-  - stream_options.include_usage gates the usage chunk.
-  - Conversation persistence happens inside the generator after the
-    router's async-for drains, preserving the non-streaming path's
-    append/rewrite semantics.
-  - X-FreelOAder-Conversation-Id is set on the streaming response
-    headers before any body bytes flow.
-  - 8 new tests in tests/frontend/test_streaming.py.
-  - 42/42 tests green; gate_1 still GREEN; gate_2 shows 2.1's
-    SSE-handler check flipped (1/6 phase-2 specific green).
+Step 2.2 recap (closed):
+  - src/freeloader/core/turn_state.py — TurnState (8 variants),
+    TERMINAL_STATES, transition() pure function with
+    IllegalTransition, is_terminal/legal_targets helpers, Turn
+    driver class.
+  - tests/core/test_turn_state.py — 31 tests covering every legal
+    edge, ≥1 illegal per state, terminal predicate, and the Turn
+    driver.
+  - Router.dispatch now drives the machine: queued → spawning →
+    streaming → terminal. Terminal selection: rate_limit_event with
+    status != "allowed" supersedes a clean stop (→ rate_limited);
+    FinishDelta(error) → backend_error; empty-stream adapter exit
+    → backend_error; otherwise → complete.
+  - turn_done event gains a `state` field; `outcome` (mirrors
+    finish_reason) is preserved for backward compat.
+  - Journal-write failures now log via stdlib `freeloader.router`
+    error logger with intended_state/intended_outcome — observable,
+    not silent.
+  - 79/79 tests green; gate_2 phase-specific now 3/6.
 
 Phase 2 remaining steps (sketched; refine at each step_start):
-  - Step 2.2 — turn state machine (this step).
-  - Step 2.3 — client-disconnect → SIGTERM → SIGKILL-after-3s;
-    the 50-drop stress test. PLAN decision #5 (discard
-    backend_session_id on cancellation).
-  - Step 2.4 — 5-minute hard timeout (PLAN decision #8).
+  - Step 2.3 — client-disconnect cancellation (this step).
+  - Step 2.4 — 5-minute hard timeout (PLAN decision #8). Needs
+    asyncio.wait_for around the dispatch loop; turn → timed_out;
+    subprocess SIGKILL.
   - Step 2.5 — SSE byte-diff contract test vs an OpenAI reference
-    fixture. The "is our SSE shape actually compatible" check.
+    fixture. Pinning the wire shape so vendor SDKs don't choke.
 
-Exit criteria (for step 2.2):
-  - [ ] src/freeloader/core/turn_state.py exists with a TurnState
-        enum covering all eight states and a pure `transition()`
-        function rejecting illegal edges.
-  - [ ] tests/core/test_turn_state.py exercises every legal
-        transition and at least one illegal one per state.
-  - [ ] Router.dispatch drives the machine: queued → spawning →
-        streaming → complete on the happy path; emits the correct
-        terminal event (turn_done / timed_out / rate_limited / …).
-  - [ ] A journal write failure surfaces as `backend_error`, not a
-        silent success.
-  - [ ] Existing tests (42) stay green; no behavior change visible
-        to the frontend on the happy path.
+Exit criteria (for step 2.3):
+  - [ ] tests/frontend/test_disconnect_no_zombies.py exists and is
+        green: 50 sequential client-disconnect cycles produce zero
+        leaked claude subprocesses (verified via mock subprocess
+        with SIGTERM/SIGKILL accounting; no live claude required).
+  - [ ] StreamingResponse generator catches the asyncio cancellation
+        that fires on client disconnect and propagates it into the
+        adapter's send() loop, which terminates the subprocess.
+  - [ ] ClaudeAdapter.send() finally-block sends SIGTERM, waits 3s,
+        then SIGKILL if still alive; deletes the scratch dir.
+  - [ ] Cancelled turn writes `state=cancelled` to events.jsonl;
+        the captured backend_session_id is NOT recorded in the
+        binding map (PLAN decision #5 discards it).
+  - [ ] Existing 79 tests stay green.
 
 Blockers: none.
 
 Phase 1 still-untested slice (carried forward):
-  - Live `claude -p` subprocess exercise. All phase-1 + 2.1 tests
-    used fake adapters or monkey-patched asyncio.create_subprocess_
-    exec. An opt-in live-claude smoke test should land somewhere in
-    phase 2 to verify confirm_claude_model_usage_fields against
-    real output.
+  - Live `claude -p` subprocess exercise. All phase-1 + 2.1/2.2
+    tests use fake adapters or monkey-patched
+    asyncio.create_subprocess_exec. An opt-in live-claude smoke
+    test should land before phase 2 closes to verify
+    confirm_claude_model_usage_fields against real output and to
+    sanity-check the SIGTERM/SIGKILL plumbing of step 2.3.
 
 Recent lessons to keep in mind (see JOURNAL.jsonl for full text):
   - claude -p exits 0 even on rate_limit; inspect events, not exit code

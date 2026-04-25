@@ -84,3 +84,5 @@
 {"ts": "2026-04-24T08:48:51Z", "kind": "phase_done", "text": "phase 1 CLOSED — ClaudeAdapter non-streaming single conversation", "phase": "1", "commit": "af53a41", "tests": "35", "gate": "green"}
 {"ts": "2026-04-24T09:16:14Z", "kind": "step_start", "text": "2.1", "phase": "2", "step": "2.1", "subject": "sse_streaming"}
 {"ts": "2026-04-24T09:20:04Z", "kind": "step_done", "text": "2.1", "phase": "2", "step": "2.1", "subject": "sse_streaming"}
+{"ts": "2026-04-25T01:53:23Z", "kind": "step_start", "text": "2.2", "phase": "2", "step": "2.2", "subject": "turn_state_machine"}
+{"ts": "2026-04-25T01:56:59Z", "kind": "step_done", "text": "2.2", "phase": "2", "step": "2.2", "subject": "turn_state_machine"}
