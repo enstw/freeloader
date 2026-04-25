@@ -4,8 +4,11 @@
 # field.
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
+
+import pytest
 
 from freeloader.canonical.deltas import (
     Delta,
@@ -151,6 +154,75 @@ async def test_empty_stream_terminal_is_backend_error():
     e = events.events[0]
     assert e["state"] == "backend_error"
     assert e["outcome"] == "error"
+
+
+class _BlockingAdapter:
+    """First yields a SessionIdDelta then waits forever — modelling a
+    long-running streaming turn. Tracks whether its finally block ran."""
+
+    def __init__(self, sid: str = "blocked-sid") -> None:
+        self.sid = sid
+        self.finally_ran = False
+
+    async def send(
+        self,
+        prompt: str,
+        *,
+        session_id: str,
+        resume_session_id: str | None = None,
+    ) -> AsyncIterator[Delta]:
+        try:
+            yield SessionIdDelta(session_id=self.sid)
+            # Block on an event that nobody sets.
+            await asyncio.Event().wait()
+        finally:
+            self.finally_ran = True
+
+
+async def test_cancellation_drives_state_to_cancelled_and_skips_binding():
+    # Step 2.3 exit criterion: cancellation marks the turn cancelled
+    # and discards the backend session id (PLAN decision #5).
+    events = _CapturingEvents()
+    adapter = _BlockingAdapter(sid="poisoned-sid")
+    router = Router(claude=adapter, events=events)
+
+    gen = router.dispatch(
+        conversation_id="conv-x",
+        stored_messages=[],
+        new_messages=[CanonicalMessage(role="user", content="hi")],
+    )
+    first = await gen.__anext__()
+    assert isinstance(first, SessionIdDelta)
+    await gen.aclose()
+
+    assert adapter.finally_ran is True
+    # turn_done was written with state=cancelled.
+    assert len(events.events) == 1
+    e = events.events[0]
+    assert e["state"] == "cancelled"
+    assert e["outcome"] == "cancelled"
+    # backend_session_id is preserved in the journal (forensic trail)
+    # but NOT bound for resume — the next turn starts fresh.
+    assert e["backend_session_id"] == "poisoned-sid"
+    assert "conv-x" not in router._bindings
+
+
+async def test_adapter_exception_drives_state_to_backend_error():
+    class _BoomAdapter:
+        async def send(
+            self, prompt, *, session_id, resume_session_id=None
+        ) -> AsyncIterator[Delta]:
+            yield SessionIdDelta(session_id="b1")
+            raise RuntimeError("kaboom")
+
+    events = _CapturingEvents()
+    router = Router(claude=_BoomAdapter(), events=events)
+    with pytest.raises(RuntimeError, match="kaboom"):
+        await _drain(router)
+    assert events.events[0]["state"] == "backend_error"
+    # On a mid-stream failure, the binding is not committed — the
+    # post-loop block where binding is written never runs.
+    assert "conv-test" not in router._bindings
 
 
 async def test_journal_write_failure_logged_not_silent(caplog):

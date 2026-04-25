@@ -6,6 +6,7 @@
 # phase 4; round-robin lands phase 3.
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import logging
 import uuid
@@ -69,78 +70,113 @@ class Router:
             resume = None
         session_id = backend_sid or str(uuid.uuid4())
 
-        captured_sid = backend_sid
+        # Holds the backend session id that was *observed* during this turn.
+        # Committed to self._bindings only when a non-cancelled terminal is
+        # reached — PLAN decision #5 says cancellation discards the id
+        # because a SIGTERMed CLI leaves a partial generation in its local
+        # state and resuming via that id causes permanent state drift.
+        observed_sid: str | None = backend_sid
         finish_reason = "error"
         usage: UsageDelta | None = None
         rate_limit_exceeded = False
 
         turn.goto(TurnState.SPAWNING)
+        adapter_gen = self.claude.send(
+            prompt,
+            session_id=session_id,
+            resume_session_id=resume,
+        )
         try:
-            async for delta in self.claude.send(
-                prompt,
-                session_id=session_id,
-                resume_session_id=resume,
-            ):
-                if turn.state is TurnState.SPAWNING:
-                    # First delta from the adapter ⇒ subprocess is up
-                    # and producing output. Move into streaming.
-                    turn.goto(TurnState.STREAMING)
+            try:
+                async for delta in adapter_gen:
+                    if turn.state is TurnState.SPAWNING:
+                        # First delta from the adapter ⇒ subprocess is up
+                        # and producing output. Move into streaming.
+                        turn.goto(TurnState.STREAMING)
 
-                if isinstance(delta, SessionIdDelta):
-                    captured_sid = delta.session_id
-                    self._bindings[conversation_id] = delta.session_id
-                elif isinstance(delta, FinishDelta):
-                    finish_reason = delta.reason
-                elif isinstance(delta, UsageDelta):
-                    usage = delta
-                elif isinstance(delta, RateLimitDelta):
-                    if delta.status != "allowed":
+                    if isinstance(delta, SessionIdDelta):
+                        observed_sid = delta.session_id
+                    elif isinstance(delta, FinishDelta):
+                        finish_reason = delta.reason
+                    elif isinstance(delta, UsageDelta):
+                        usage = delta
+                    elif (
+                        isinstance(delta, RateLimitDelta) and delta.status != "allowed"
+                    ):
                         rate_limit_exceeded = True
-                yield delta
-        except Exception:  # adapter raised mid-stream
-            terminal = TurnState.BACKEND_ERROR
+                    yield delta
+            except (asyncio.CancelledError, GeneratorExit):
+                # Client disconnected (CancelledError when an upstream
+                # task is cancelled; GeneratorExit when this generator
+                # itself was aclose()'d, e.g. by Starlette's
+                # StreamingResponse on a dropped HTTP connection). Drive
+                # turn → cancelled and discard the backend_session_id
+                # (PLAN decision #5: a SIGTERMed CLI leaves a partial
+                # generation in its local state and resuming via that
+                # id causes permanent state drift).
+                turn.goto(TurnState.CANCELLED)
+                self._record_terminal(
+                    turn=turn,
+                    conversation_id=conversation_id,
+                    # Record what we observed for the forensic trail, but
+                    # do NOT bind: the next turn will start fresh.
+                    captured_sid=observed_sid or session_id,
+                    finish_reason="cancelled",
+                    usage=usage,
+                )
+                raise
+            except Exception:  # adapter raised mid-stream
+                turn.goto(TurnState.BACKEND_ERROR)
+                self._record_terminal(
+                    turn=turn,
+                    conversation_id=conversation_id,
+                    captured_sid=observed_sid or session_id,
+                    finish_reason="error",
+                    usage=None,
+                )
+                raise
+
+            # ---- Normal completion: decide terminal based on observations.
+            if turn.state is TurnState.SPAWNING:
+                # Adapter exited cleanly without yielding anything — that's
+                # not a successful turn. No FinishDelta, no text.
+                terminal = TurnState.BACKEND_ERROR
+                finish_reason = "error"
+            elif rate_limit_exceeded:
+                # PLAN decision #4: claude reports rate_limit_event with
+                # status != "allowed" while still completing the response.
+                # Mark the turn rate_limited so the router (phase 4) can
+                # act on it; the assistant text is still real.
+                terminal = TurnState.RATE_LIMITED
+            elif finish_reason == "error":
+                terminal = TurnState.BACKEND_ERROR
+            else:
+                terminal = TurnState.COMPLETE
+
             turn.goto(terminal)
+
+            # Commit the binding. Decision #5 only excludes cancelled /
+            # timed_out (forcibly killed subprocesses). Other terminals —
+            # even backend_error / rate_limited — leave the backend
+            # session in a consistent state, so the binding is safe to
+            # keep.
+            committed_sid = observed_sid or session_id
+            self._bindings[conversation_id] = committed_sid
+
             self._record_terminal(
                 turn=turn,
                 conversation_id=conversation_id,
-                captured_sid=captured_sid or session_id,
-                finish_reason="error",
-                usage=None,
+                captured_sid=committed_sid,
+                finish_reason=finish_reason,
+                usage=usage,
             )
-            raise
-
-        # If the adapter never emitted a SessionIdDelta, fall back to the
-        # --session-id we generated so the binding still pins the
-        # conversation to a claude session.
-        if captured_sid is None:
-            captured_sid = session_id
-            self._bindings[conversation_id] = session_id
-
-        # Decide the terminal based on what we observed.
-        if turn.state is TurnState.SPAWNING:
-            # Adapter exited cleanly without yielding anything — that's
-            # not a successful turn. No FinishDelta, no text.
-            terminal = TurnState.BACKEND_ERROR
-            finish_reason = "error"
-        elif rate_limit_exceeded:
-            # PLAN decision #4: claude reports rate_limit_event with
-            # status != "allowed" while still completing the response.
-            # Mark the turn rate_limited so the router (phase 4) can act
-            # on it; the assistant text is still real.
-            terminal = TurnState.RATE_LIMITED
-        elif finish_reason == "error":
-            terminal = TurnState.BACKEND_ERROR
-        else:
-            terminal = TurnState.COMPLETE
-
-        turn.goto(terminal)
-        self._record_terminal(
-            turn=turn,
-            conversation_id=conversation_id,
-            captured_sid=captured_sid,
-            finish_reason=finish_reason,
-            usage=usage,
-        )
+        finally:
+            # Ensure the adapter's finally block runs (SIGTERM/SIGKILL +
+            # scratch rmtree). aclose() is a no-op when the adapter is
+            # already exhausted; on cancellation it's the only way to get
+            # the inner generator's cleanup to fire, since `async for`
+            # doesn't auto-close on exception.
+            await adapter_gen.aclose()
 
     def _record_terminal(
         self,
