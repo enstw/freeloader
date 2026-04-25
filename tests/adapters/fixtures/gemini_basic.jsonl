@@ -1,0 +1,4 @@
+{"type":"init","timestamp":"2026-04-25T03:33:33.834Z","session_id":"004e7cb9-10e2-44af-842c-1f1c59c9ab2f","model":"auto-gemini-3"}
+{"type":"message","timestamp":"2026-04-25T03:33:33.837Z","role":"user","content":"Reply with exactly the word ok."}
+{"type":"message","timestamp":"2026-04-25T03:33:36.711Z","role":"assistant","content":"ok","delta":true}
+{"type":"result","timestamp":"2026-04-25T03:33:36.755Z","status":"success","stats":{"total_tokens":7821,"input_tokens":7679,"output_tokens":45,"cached":0,"input":7679,"duration_ms":2922,"tool_calls":0,"models":{"gemini-2.5-flash-lite":{"total_tokens":859,"input_tokens":759,"output_tokens":44,"cached":0,"input":759},"gemini-3-flash-preview":{"total_tokens":6962,"input_tokens":6920,"output_tokens":1,"cached":0,"input":6920}}}}
