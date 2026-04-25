@@ -1,113 +1,121 @@
 # FreelOAder status — 2026-04-25
 
 ## Phase: 4/5 — quota tracking + threshold switching
-## Step: 4.1 — claude rate_limit_event → quota_signal journal events
+## Step: 4.2a — gemini/codex token-window quota inference
 
 Purpose (why this step exists):
-  Phase 4 replaces round-robin with quota-aware routing — the actual
-  product (PLAN principle #5: quota is an event stream, not a
-  counter; the core value proposition).
+  Phase 4.1 covered the only vendor with explicit rate-limit
+  telemetry (claude's `rate_limit_event` → `quota_signal`). Gemini
+  and codex give no such signal, so phase 4.3's quota-aware
+  Strategy would be blind to them. Step 4.2 closes that gap by
+  *inferring* pressure from observable signals.
 
-  Step 4.1 lands the foundational piece: convert claude's native
-  `rate_limit_event` records (the only vendor with explicit quota
-  telemetry) into canonical `quota_signal` events written to
-  `<data_dir>/events.jsonl` (PLAN decision #6). Subsequent steps
-  consume that stream — phase 4 inference for gemini/codex (4.2),
-  the quota-aware Strategy that reads the derived view (4.3), and
-  config-driven thresholds (4.4).
+  Two distinct inferred signals are in scope for phase 4.2 overall:
+    a) cumulative input+output tokens per rolling window (THIS step)
+    b) explicit 429 detection                                 (4.2b)
+
+  4.2a delivers (a) on its own. (b) is split into 4.2b because
+  surfacing 429 from codex/gemini requires adapter-level work that
+  doesn't exist today (stderr capture, exit-code propagation, a
+  delta variant or extended ErrorDelta). Splitting keeps 4.2a a
+  small, low-risk router-and-builder change; 4.3 can read both 4.1
+  and 4.2a signals from one stream while 4.2b grows in parallel.
+
+Why split now (not bundle):
+  - 4.2a touches: 1 builder + router glue + tests. Reversible.
+  - 4.2b touches: gemini.py + codex.py adapter lifecycles
+    (currently pipe stderr to /dev/null effectively); a new way
+    for adapters to surface "I observed a 429"; tests across all
+    three adapters. Different risk profile, different review
+    surface, different commit.
+  - Phase 4.3 can land with 4.2a alone — it just won't react to
+    gemini/codex 429s until 4.2b lands. Threshold-based pressure
+    (4.2a) is the dominant signal anyway.
 
 Design (one sentence per file):
-  - `src/freeloader/core/quota.py` — pure builder
-    `build_quota_signal(provider, conversation_id, delta, ts) -> dict`
-    that produces the canonical event from a `RateLimitDelta` plus
-    context. No I/O; no router state. Tested in isolation so phase
-    4.2 (gemini/codex inference) can grow a sibling builder without
-    touching the router.
-  - `src/freeloader/router.py` — when `RateLimitDelta` arrives in
-    the `async for` loop, call `self.events.write(build_quota_signal(
-    provider, conversation_id, delta, now))` immediately (before
-    the terminal `turn_done`). Per-delta, not per-turn — claude can
-    emit multiple in one turn (e.g., five_hour and seven_day
-    statuses) and each is its own observation.
-  - `tests/core/test_quota_claude_rate_limit.py` — drives Router
-    with scripted adapters that yield RateLimitDeltas, asserts the
-    captured events list contains correctly-shaped quota_signal
-    records in the right order relative to turn_done.
+  - `src/freeloader/core/quota.py` — add a sibling pure builder
+    `build_quota_signal_from_usage(provider, conversation_id,
+    window_seconds, window_tokens, tokens_threshold, ts) -> dict`.
+    Same canonical shape as `build_quota_signal` (frozen in 4.1):
+    `rate_limit_type="inferred_window"`, `status="allowed"` if
+    window_tokens < tokens_threshold else `"exceeded"`, `raw`
+    carrying the window summary (`window_seconds`, `window_tokens`,
+    `tokens_threshold`) so a phase-4.3 Strategy can see what
+    triggered the call without re-deriving it.
+  - `src/freeloader/router.py` — add per-provider token-window
+    state (`self._token_windows: dict[str, list[tuple[float,
+    int]]]`); after the adapter's UsageDelta arrives for a
+    gemini/codex turn, append `(monotonic_ts, total_tokens)`,
+    evict entries older than `window_seconds`, sum the remainder,
+    emit one inferred quota_signal via `_emit_inferred_quota_signal`
+    helper that mirrors `_emit_quota_signal` (same write-failure
+    logging discipline). Skip claude — it has native
+    RateLimitDelta, double-emitting would double-count.
+  - `tests/core/test_quota_inference.py` — pure builder tests +
+    router emission tests with `_ScriptedAdapter` covering both
+    under-threshold and over-threshold cases; window eviction;
+    claude path emits no inferred signal; inferred signal precedes
+    turn_done; ts is ISO UTC; write failure logged not silent.
 
-Canonical quota_signal shape (frozen here for phase 4.2 to follow):
-  {
-    "ts": ISO-8601 UTC,
-    "kind": "quota_signal",
-    "provider": "claude" | "codex" | "gemini",
-    "conversation_id": str,
-    "rate_limit_type": str,        # e.g. "five_hour"
-    "status": str,                 # "allowed" | "exceeded" | ...
-    "resets_at": int | None,
-    "overage_status": str | None,
-    "raw": dict                    # vendor payload, preserved
-  }
+Threshold and window defaults (placeholder):
+  - `INFERENCE_WINDOW_SECONDS = 300` (5 minutes)
+  - `INFERENCE_TOKENS_THRESHOLD = 1_000_000` per provider
+  These are intentionally round numbers, not tuned to any vendor's
+  published limits. Step 4.4 moves them to `freeloader.toml`
+  (PLAN decision #10). Tests inject custom values, never depend
+  on the placeholders.
 
-Why emit on `status=allowed` too: the stream-as-truth principle (#5)
-means even an "allowed" record carries info — `resets_at`
-timestamp, the fact that we polled — and phase 4.3's quota-aware
-Strategy will use those signals to compute pressure trends, not
-just threshold breaches. Emitting only the breaches throws away
-half the telemetry.
+Inference is opt-in per provider:
+  - `_INFERENCE_PROVIDERS = {"codex", "gemini"}` — hardcoded set.
+  - claude is excluded: native RateLimitDelta is the source of
+    truth, inference would double-count.
+  - Any future provider added to the pool is excluded by default
+    until explicitly added to the inference set.
 
-Exit criteria for step 4.1:
-  - [ ] `src/freeloader/core/quota.py` exists with
-        `build_quota_signal(provider, conversation_id, delta, ts) -> dict`
-        producing the canonical shape above.
-  - [ ] Router emits one quota_signal per RateLimitDelta seen (both
-        allowed and non-allowed), via `self.events.write(...)`,
+Exit criteria for step 4.2a:
+  - [ ] `src/freeloader/core/quota.py` grows
+        `build_quota_signal_from_usage(provider, conversation_id,
+        window_seconds, window_tokens, tokens_threshold, ts) -> dict`
+        producing the canonical shape with
+        `rate_limit_type="inferred_window"`.
+  - [ ] Router emits one inferred quota_signal per UsageDelta from
+        codex/gemini (zero from claude), via `self.events.write(...)`
         before the terminal turn_done.
-  - [ ] `tests/core/test_quota_claude_rate_limit.py` covers:
-          * one allowed delta → one quota_signal + one turn_done
-          * one non-allowed delta → one quota_signal + one turn_done
-          * two deltas in one turn → two quota_signals + one turn_done
-          * no RateLimitDelta seen → zero quota_signals + one turn_done
-          * quota_signal events precede turn_done in event order
-          * quota_signal carries provider, conversation_id,
-            rate_limit_type, status, resets_at, overage_status, raw,
-            and a UTC ISO-8601 ts
-  - [ ] All existing tests still green (168 → 173 expected).
+  - [ ] `tests/core/test_quota_inference.py` covers:
+          * builder shape with window_tokens < threshold → status=allowed
+          * builder shape with window_tokens >= threshold → status=exceeded
+          * router: codex UsageDelta → one inferred quota_signal
+          * router: gemini UsageDelta (compound, multiple sub-models) →
+            one inferred quota_signal summing all sub-models
+          * router: claude UsageDelta → zero inferred quota_signals
+          * router: window evicts entries older than window_seconds
+          * inferred quota_signal precedes turn_done in event order
+          * ts is ISO UTC tz-aware
+          * write failure logged not silent
+  - [ ] All existing tests still green (178 → 187 expected).
   - [ ] ruff check + ruff format clean.
+  - [ ] gate_4.sh's "gemini/codex 429 + token-window inference test"
+        check passes (file existence — it does not introspect contents).
 
-Out of scope for 4.1 (deferred):
-  - gemini/codex quota *inference* (cumulative tokens + 429) —
-    that's step 4.2.
-  - The quota-aware routing *Strategy* that reads the derived view —
-    that's step 4.3.
-  - `quota-aware` strategy file — gate_4 expects
-    `src/freeloader/core/routing/quota_aware.py` for step 4.3.
-  - `freeloader.toml` thresholds — that's step 4.4.
-  - Replay test (`tests/core/test_routing_replay.py`) — that's
-    step 4.5.
-  - Live `claude -p` smoke harness for end-to-end rate_limit_event
-    capture — carries forward from phase 3 still-untested slice.
+Out of scope for 4.2a (deferred):
+  - 429 detection from codex/gemini — that's step 4.2b. Requires
+    adapter-side stderr/exit-code handling.
+  - Persistent window state across FreelOAder restarts. The window
+    is in-memory; a restart loses pressure history. Acceptable for
+    phase 4 (personal-use proxy) — quota_signal events on disk are
+    the durable record; the window is just a derived view.
+  - Quota-aware routing Strategy that *reads* these signals — 4.3
+    (`src/freeloader/core/routing/quota_aware.py`).
+  - `freeloader.toml` thresholds — 4.4.
+  - Replay test — 4.5.
 
-Phase 3 recap (closed, 22/22 gate checks green):
-  - 3.1 CodexAdapter ✅
-  - 3.2 Per-conversation CLI state isolation env vars (claude
-    CLAUDE_CONFIG_DIR / codex CODEX_HOME; gemini fallback to
-    per-adapter mutex) ✅
-  - 3.3 GeminiAdapter — compound provider, stats.models per turn ✅
-  - 3.4 Round-robin Router across registered adapters ✅
-  - 3.5 Provider-switch + canonical history replay (Router.bind) ✅
-  - 3.6 /v1/models endpoint (auto + per-provider ids) ✅
-  - 3.7 Cross-adapter contract suite (21 tests, 3 adapters) +
-    RoundRobinStrategy extraction ✅
-  - 168/168 tests passing.
-
-Phase 4 sketch (from ROADMAP.md):
-  - 4.1 claude rate_limit_event → quota_signal events (this step).
-  - 4.2 gemini/codex quota inference (cumulative tokens + 429).
-  - 4.3 Quota-aware Strategy reading the derived view; pick(order)
-    chooses the least-pressured provider.
-  - 4.4 Threshold + weight config in freeloader.toml (PLAN
-    decision #10).
-  - 4.5 Replay test: fixture JOURNAL → deterministic routing
-    decisions (no wall-clock dependency).
+Phase 4 sketch (revised):
+  - 4.1 claude rate_limit_event → quota_signal events ✅ (closed)
+  - 4.2a gemini/codex token-window inference (this step).
+  - 4.2b gemini/codex 429 detection (adapter stderr work).
+  - 4.3 Quota-aware Strategy reading the derived view.
+  - 4.4 Threshold + weight config in freeloader.toml.
+  - 4.5 Replay test: fixture JOURNAL → deterministic decisions.
 
 Recent lessons (see JOURNAL.jsonl for full text):
   - claude -p exits 0 on rate_limit; inspect events
@@ -124,3 +132,6 @@ Recent lessons (see JOURNAL.jsonl for full text):
   - json.dumps default separators differ from OpenAI wire bytes
   - Router._bindings is now (provider, sid|None); None pins for
     replay (mid-conversation provider switch)
+  - 4.1 frozen quota_signal shape: rate_limit_type/status/resets_at/
+    overage_status/raw — sibling builders must produce identical
+    shape so 4.3 reads ONE stream
