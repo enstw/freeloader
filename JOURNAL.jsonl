@@ -96,3 +96,4 @@
 {"ts": "2026-04-25T02:12:09Z", "kind": "lesson", "text": "json.dumps default separators (', ', ': ') diverge from OpenAI wire bytes; sse_encode uses compact (',', ':')", "subject": "sse_byte_compatibility", "severity": "low"}
 {"ts": "2026-04-25T02:12:54Z", "kind": "phase_done", "text": "phase 2 complete", "phase": "2", "commit": "850fdef6c8be2de307d61652e5aeadfe044ea6eb"}
 {"ts": "2026-04-25T02:12:54Z", "kind": "phase_start", "text": "begin phase 3", "phase": "3", "source": "ROADMAP.md#phase-3"}
+{"ts": "2026-04-25T02:19:50Z", "kind": "step_start", "text": "3.1", "phase": "3", "step": "3.1", "subject": "codex_adapter"}
