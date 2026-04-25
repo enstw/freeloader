@@ -25,6 +25,7 @@ from freeloader.canonical.deltas import (
     UsageDelta,
 )
 from freeloader.canonical.messages import CanonicalMessage
+from freeloader.core.routing import RoundRobinStrategy
 from freeloader.core.turn_state import Turn, TurnState
 from freeloader.storage import _NoOpEventWriter, default_events
 
@@ -57,6 +58,7 @@ class Router:
         events: object | None = None,
         *,
         turn_timeout_seconds: float | None = None,
+        strategy: object | None = None,
     ) -> None:
         # Build the active provider pool. Ordering follows the kwarg
         # order: claude → codex → gemini. That order is the round-
@@ -77,7 +79,9 @@ class Router:
             adapters["claude"] = ClaudeAdapter()
         self._adapters: dict[str, _Adapter] = adapters
         self._provider_order: list[str] = list(adapters.keys())
-        self._next_provider_idx: int = 0
+        # Selection policy. Default = round-robin (phase 3); phase 4
+        # will plug in a quota-aware strategy via the same kwarg.
+        self._strategy = strategy if strategy is not None else RoundRobinStrategy()
 
         self.events = events or default_events()
         self.turn_timeout_seconds: float = (
@@ -104,15 +108,19 @@ class Router:
         the active pool."""
         return self._adapters.get("claude")
 
+    @property
+    def _next_provider_idx(self) -> int:
+        """Backward-compat read-only view of the strategy's cursor.
+        Phase-3 tests reach in here; phase 4's quota strategy may
+        not have a meaningful cursor, in which case this raises.
+        New tests should not depend on this property."""
+        return getattr(self._strategy, "cursor", 0)
+
     def _pick_next_provider(self) -> str:
-        """Round-robin step. Advances the index and wraps. Called
-        only on first-turn dispatch for a conversation; resumed turns
+        """Delegates to the active selection strategy. Called only on
+        first-turn dispatch for a conversation; resumed turns
         dispatch via the binding's recorded provider."""
-        provider = self._provider_order[
-            self._next_provider_idx % len(self._provider_order)
-        ]
-        self._next_provider_idx += 1
-        return provider
+        return self._strategy.pick(self._provider_order)
 
     def bind(self, conversation_id: str, new_provider: str) -> None:
         """Pin `conversation_id` to `new_provider`. The next dispatch
