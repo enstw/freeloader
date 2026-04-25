@@ -89,3 +89,5 @@
 {"ts": "2026-04-25T01:59:12Z", "kind": "step_start", "text": "2.3", "phase": "2", "step": "2.3", "subject": "disconnect_cancellation"}
 {"ts": "2026-04-25T02:04:40Z", "kind": "step_done", "text": "2.3", "phase": "2", "step": "2.3", "subject": "disconnect_cancellation"}
 {"ts": "2026-04-25T02:04:40Z", "kind": "lesson", "text": "Starlette StreamingResponse aclose() injects GeneratorExit, not asyncio.CancelledError; cancellation handlers must catch both", "subject": "cancellation_exception_types", "severity": "medium"}
+{"ts": "2026-04-25T02:06:51Z", "kind": "step_start", "text": "2.4", "phase": "2", "step": "2.4", "subject": "hard_timeout"}
+{"ts": "2026-04-25T02:08:52Z", "kind": "step_done", "text": "2.4", "phase": "2", "step": "2.4", "subject": "hard_timeout"}

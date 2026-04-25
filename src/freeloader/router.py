@@ -39,13 +39,26 @@ class _Adapter(Protocol):
 
 
 class Router:
+    # PLAN decision #8: hard cap on per-turn wall-clock so a hung CLI
+    # doesn't monopolize a conversation's serializing mutex (decision
+    # #1) indefinitely. 5 minutes is the documented default; tests
+    # override via the constructor.
+    DEFAULT_TURN_TIMEOUT_SECONDS: float = 300.0
+
     def __init__(
         self,
         claude: _Adapter | None = None,
         events: object | None = None,
+        *,
+        turn_timeout_seconds: float | None = None,
     ) -> None:
         self.claude: _Adapter = claude or ClaudeAdapter()
         self.events = events or default_events()
+        self.turn_timeout_seconds: float = (
+            turn_timeout_seconds
+            if turn_timeout_seconds is not None
+            else self.DEFAULT_TURN_TIMEOUT_SECONDS
+        )
         # {conversation_id → backend_session_id}. In-memory for phase 1.
         self._bindings: dict[str, str] = {}
 
@@ -88,23 +101,43 @@ class Router:
         )
         try:
             try:
-                async for delta in adapter_gen:
-                    if turn.state is TurnState.SPAWNING:
-                        # First delta from the adapter ⇒ subprocess is up
-                        # and producing output. Move into streaming.
-                        turn.goto(TurnState.STREAMING)
+                async with asyncio.timeout(self.turn_timeout_seconds):
+                    async for delta in adapter_gen:
+                        if turn.state is TurnState.SPAWNING:
+                            # First delta from the adapter ⇒ subprocess
+                            # is up and producing output. Move into
+                            # streaming.
+                            turn.goto(TurnState.STREAMING)
 
-                    if isinstance(delta, SessionIdDelta):
-                        observed_sid = delta.session_id
-                    elif isinstance(delta, FinishDelta):
-                        finish_reason = delta.reason
-                    elif isinstance(delta, UsageDelta):
-                        usage = delta
-                    elif (
-                        isinstance(delta, RateLimitDelta) and delta.status != "allowed"
-                    ):
-                        rate_limit_exceeded = True
-                    yield delta
+                        if isinstance(delta, SessionIdDelta):
+                            observed_sid = delta.session_id
+                        elif isinstance(delta, FinishDelta):
+                            finish_reason = delta.reason
+                        elif isinstance(delta, UsageDelta):
+                            usage = delta
+                        elif (
+                            isinstance(delta, RateLimitDelta)
+                            and delta.status != "allowed"
+                        ):
+                            rate_limit_exceeded = True
+                        yield delta
+            except TimeoutError:
+                # PLAN decision #8: hard 5-minute cap. The deadline
+                # fired; asyncio injected CancelledError at our await,
+                # asyncio.timeout converted it to TimeoutError on
+                # context exit. Drive turn → timed_out, journal it,
+                # discard the binding (forcibly killed CLI = poisoned
+                # session id, same logic as cancellation in 2.3), and
+                # return cleanly so the consumer sees end-of-stream.
+                turn.goto(TurnState.TIMED_OUT)
+                self._record_terminal(
+                    turn=turn,
+                    conversation_id=conversation_id,
+                    captured_sid=observed_sid or session_id,
+                    finish_reason="timed_out",
+                    usage=usage,
+                )
+                return
             except (asyncio.CancelledError, GeneratorExit):
                 # Client disconnected (CancelledError when an upstream
                 # task is cancelled; GeneratorExit when this generator
