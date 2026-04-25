@@ -143,3 +143,4 @@
 {"ts": "2026-04-25T07:32:11Z", "kind": "step_done", "text": "5.2", "phase": "5", "step": "5.2", "tests_added": "7", "tests_total": "239"}
 {"ts": "2026-04-25T07:32:12Z", "kind": "lesson", "text": "gate_5 decision check used grep with no-whitespace JSON; reflect.sh writes whitespace JSON via json.dumps default — fixed by switching gate_5 to a python json scan", "phase": "5", "step": "5.2", "subject": "gate_5_grep", "severity": "low"}
 {"ts": "2026-04-25T07:34:03Z", "kind": "step_done", "text": "5.3", "phase": "5", "step": "5.3", "tests_added": "4", "tests_total": "243"}
+{"ts": "2026-04-25T07:35:33Z", "kind": "step_done", "text": "5.4", "phase": "5", "step": "5.4", "tests_total": "243"}
