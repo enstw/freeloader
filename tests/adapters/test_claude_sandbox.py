@@ -84,6 +84,44 @@ async def test_send_creates_scratch_and_spawns_with_add_dir(tmp_path, captured_s
     assert not scratch.exists()
 
 
+async def test_argv_separates_prompt_from_variadic_add_dir(tmp_path, captured_spawn):
+    # Regression: `--add-dir` is variadic so it greedily consumes the
+    # trailing prompt as another directory if not terminated. claude then
+    # exits with "Input must be provided ... when using --print" (silently,
+    # into the stderr we discard) and the user sees an empty 200 response.
+    # Lock in `--` as the separator and the prompt as the very last argv item.
+    adapter = ClaudeAdapter(data_dir=tmp_path)
+    _ = [
+        d
+        async for d in adapter.send(
+            "the prompt body", conversation_id="conv-sep", session_id="conv-sep"
+        )
+    ]
+    argv = captured_spawn["argv"]
+    assert argv[-2:] == ["--", "the prompt body"]
+    # `--` must appear AFTER `--add-dir <scratch>` so the variadic stops
+    # consuming positionals before the prompt.
+    assert argv.index("--add-dir") < argv.index("--")
+
+
+async def test_argv_separator_holds_when_resume_id_present(tmp_path, captured_spawn):
+    # `-r <session>` lands between --add-dir and the prompt. The separator
+    # must still come right before the prompt so prompt remains positional.
+    adapter = ClaudeAdapter(data_dir=tmp_path)
+    _ = [
+        d
+        async for d in adapter.send(
+            "resumed prompt",
+            conversation_id="conv-sep-r",
+            session_id="conv-sep-r",
+            resume_session_id="backend-99",
+        )
+    ]
+    argv = captured_spawn["argv"]
+    assert argv[-2:] == ["--", "resumed prompt"]
+    assert argv.index("-r") < argv.index("--")
+
+
 async def test_resume_session_id_emits_r_flag(tmp_path, captured_spawn):
     adapter = ClaudeAdapter(data_dir=tmp_path)
     deltas = [

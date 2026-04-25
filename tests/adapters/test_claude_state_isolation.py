@@ -1,15 +1,20 @@
-# Decision #16: each subprocess runs with CLAUDE_CONFIG_DIR redirected
-# to <data_dir>/cli-state/<conversation_id>/claude/. Isolates concurrent
-# turns on different conversations from sharing global ~/.claude state.
+# Originally written to lock in PLAN decision #16's per-conversation
+# CLAUDE_CONFIG_DIR redirection. That decision was reverted post-MVP
+# during the first live-claude run: claude reads OAuth credentials from
+# $CLAUDE_CONFIG_DIR/.claude.json, so redirecting strips the user's
+# auth (the same coupling the gemini lesson already documented for
+# GEMINI_CLI_HOME). What this file now guards is the OPPOSITE invariant:
+# claude must inherit the user's environment unchanged so OAuth from
+# `claude /login` resolves correctly.
 #
-# Verified by monkey-patching asyncio.create_subprocess_exec; no live
-# claude. The env-merge invariant (OAuth + PATH inherit) is the load-
-# bearing piece — replacing env entirely would strip auth.
+# Per-conversation isolation for claude is now implicit: each turn uses
+# an explicit --session-id (claude has no `-r latest` equivalent that
+# would race), and concurrent turns on different conversations don't
+# need a shared mutex.
 from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 
 import pytest
 
@@ -54,9 +59,11 @@ def captured_spawn(monkeypatch):
     return captured
 
 
-async def test_claude_config_dir_points_at_per_conversation_state(
-    tmp_path, captured_spawn
-):
+async def test_claude_config_dir_is_NOT_redirected(tmp_path, captured_spawn):
+    # Regression: redirecting CLAUDE_CONFIG_DIR per-conversation strips
+    # OAuth (claude reads .claude.json from $CLAUDE_CONFIG_DIR if set).
+    # The adapter must NOT touch CLAUDE_CONFIG_DIR — auth resolves from
+    # the user's global ~/.claude/ via the un-overridden default.
     adapter = ClaudeAdapter(data_dir=tmp_path)
     _ = [
         d
@@ -65,14 +72,14 @@ async def test_claude_config_dir_points_at_per_conversation_state(
 
     env = captured_spawn["env"]
     assert env is not None, "subprocess must run with explicit env"
-    expected = tmp_path / "cli-state" / "conv-A" / "claude"
-    assert env["CLAUDE_CONFIG_DIR"] == str(expected)
-    # The state dir must exist on disk at spawn time — the CLI may try
-    # to read it before any of our subsequent code runs.
-    assert expected.is_dir()
+    # Inherit whatever was in os.environ at spawn time, no override.
+    assert env.get("CLAUDE_CONFIG_DIR") == os.environ.get("CLAUDE_CONFIG_DIR")
 
 
-async def test_two_conversations_get_separate_state_dirs(tmp_path, monkeypatch):
+async def test_two_conversations_share_user_global_claude_state(tmp_path, monkeypatch):
+    # Without per-conversation CLAUDE_CONFIG_DIR isolation, both turns
+    # use the user's global state. They are de-risked from racing by
+    # the explicit --session-id per turn, not by config-dir isolation.
     seen_envs: list[dict] = []
 
     async def fake_exec(*argv, cwd=None, env=None, **kwargs):
@@ -85,22 +92,16 @@ async def test_two_conversations_get_separate_state_dirs(tmp_path, monkeypatch):
     _ = [d async for d in adapter.send("hi", conversation_id="conv-X", session_id="s1")]
     _ = [d async for d in adapter.send("hi", conversation_id="conv-Y", session_id="s2")]
 
-    assert seen_envs[0]["CLAUDE_CONFIG_DIR"] == str(
-        tmp_path / "cli-state" / "conv-X" / "claude"
+    assert seen_envs[0].get("CLAUDE_CONFIG_DIR") == seen_envs[1].get(
+        "CLAUDE_CONFIG_DIR"
     )
-    assert seen_envs[1]["CLAUDE_CONFIG_DIR"] == str(
-        tmp_path / "cli-state" / "conv-Y" / "claude"
-    )
-    assert seen_envs[0]["CLAUDE_CONFIG_DIR"] != seen_envs[1]["CLAUDE_CONFIG_DIR"]
 
 
-async def test_env_merge_keeps_oauth_relevant_inherited_vars(
-    tmp_path, captured_spawn, monkeypatch
-):
-    # Anything in os.environ that is NOT CLAUDE_CONFIG_DIR must
-    # carry through. We seed a sentinel and prove it survives.
+async def test_env_inherits_oauth_relevant_vars(tmp_path, captured_spawn, monkeypatch):
+    # The whole point of dropping the redirect: anything in os.environ
+    # carries through unchanged so OAuth credentials (file path resolved
+    # from HOME) and PATH (claude binary discovery) survive.
     monkeypatch.setenv("FREELOADER_TEST_INHERITED", "yes-please")
-    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))  # touch to keep it
 
     adapter = ClaudeAdapter(data_dir=tmp_path)
     _ = [d async for d in adapter.send("hi", conversation_id="conv-Z", session_id="s9")]
@@ -108,47 +109,4 @@ async def test_env_merge_keeps_oauth_relevant_inherited_vars(
     env = captured_spawn["env"]
     assert env["FREELOADER_TEST_INHERITED"] == "yes-please"
     assert env.get("PATH") == os.environ.get("PATH")
-    # And CLAUDE_CONFIG_DIR is the only thing we override.
-    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "cli-state" / "conv-Z" / "claude")
-
-
-async def test_state_dir_persists_across_turns_of_same_conversation(
-    tmp_path, monkeypatch
-):
-    """The state dir for conv-A must be the same path on turn 2 as on
-    turn 1, even though session_id changes (router rotates on resume).
-    Otherwise the codex thread or claude session store would be lost
-    between turns."""
-    seen_state: list[str] = []
-
-    async def fake_exec(*argv, cwd=None, env=None, **kwargs):
-        seen_state.append(env["CLAUDE_CONFIG_DIR"])
-        return _FakeProc()
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-
-    adapter = ClaudeAdapter(data_dir=tmp_path)
-    # Turn 1: random session_id (no resume).
-    _ = [
-        d
-        async for d in adapter.send(
-            "hi", conversation_id="conv-stable", session_id="rand-1"
-        )
-    ]
-    # Turn 2: backend session id is now known and used.
-    _ = [
-        d
-        async for d in adapter.send(
-            "again",
-            conversation_id="conv-stable",
-            session_id="backend-sid-from-turn-1",
-            resume_session_id="backend-sid-from-turn-1",
-        )
-    ]
-
-    assert (
-        seen_state[0]
-        == seen_state[1]
-        == str(tmp_path / "cli-state" / "conv-stable" / "claude")
-    )
-    assert (Path(seen_state[0])).is_dir()
+    assert env.get("HOME") == os.environ.get("HOME")

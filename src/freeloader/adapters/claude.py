@@ -190,12 +190,6 @@ class ClaudeAdapter:
         turn_id = uuid.uuid4().hex[:8]
         return self.data_dir / "scratch" / session_id / turn_id
 
-    def _state_dir_for(self, conversation_id: str) -> Path:
-        # PLAN decision #16: each subprocess gets a per-conversation
-        # state root via CLAUDE_CONFIG_DIR. Stable across turns of the
-        # same conversation, isolated across conversations.
-        return self.data_dir / "cli-state" / conversation_id / "claude"
-
     async def send(
         self,
         prompt: str,
@@ -206,8 +200,6 @@ class ClaudeAdapter:
     ) -> AsyncIterator[Delta]:
         scratch = self._scratch_for(session_id)
         scratch.mkdir(parents=True, exist_ok=True)
-        state_dir = self._state_dir_for(conversation_id)
-        state_dir.mkdir(parents=True, exist_ok=True)
         argv = [
             self.executable,
             "-p",
@@ -221,12 +213,25 @@ class ClaudeAdapter:
         ]
         if resume_session_id:
             argv += ["-r", resume_session_id]
-        argv.append(prompt)
+        # `--add-dir` is variadic (`--add-dir <directories...>`) so it would
+        # otherwise swallow the trailing prompt as another directory. The `--`
+        # terminator forces argparse to treat what follows as positional.
+        # Without this, claude exits with "Input must be provided either through
+        # stdin or as a prompt argument when using --print" — silently, into
+        # stderr we discard — and FreelOAder returns a 200 with empty content.
+        argv += ["--", prompt]
 
-        # Merge with os.environ so OAuth credentials and PATH inherit;
-        # only override the state-dir slot. Replacing env entirely would
-        # strip the user's auth and break CLI invocation.
-        child_env = {**os.environ, "CLAUDE_CONFIG_DIR": str(state_dir)}
+        # Inherit env unchanged. PLAN decision #16 originally redirected
+        # CLAUDE_CONFIG_DIR per-conversation for state isolation, on the
+        # assumption that OAuth would still resolve from user-global state.
+        # In vivo that assumption fails the same way the gemini lesson
+        # already documented for GEMINI_CLI_HOME: claude looks for OAuth
+        # in $CLAUDE_CONFIG_DIR/.claude.json, so redirecting strips auth
+        # and the CLI replies "Not logged in · Please run /login". Falls
+        # back to user-global ~/.claude/ (no per-conversation isolation
+        # for claude); concurrent-turn races are mitigated by claude's
+        # explicit --session-id per turn, not by config-dir isolation.
+        child_env = os.environ.copy()
 
         proc = None
         try:
