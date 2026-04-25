@@ -34,6 +34,7 @@ class _HungAdapter:
         self,
         prompt: str,
         *,
+        conversation_id: str,
         session_id: str,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[Delta]:
@@ -102,7 +103,7 @@ async def test_normal_completion_under_timeout_unaffected():
 
     class _FastAdapter:
         async def send(
-            self, prompt, *, session_id, resume_session_id=None
+            self, prompt, *, conversation_id, session_id, resume_session_id=None
         ) -> AsyncIterator[Delta]:
             from freeloader.canonical.deltas import (
                 FinishDelta,

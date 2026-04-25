@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import uuid
 from collections.abc import AsyncIterator
@@ -141,15 +142,24 @@ class CodexAdapter:
         turn_id = uuid.uuid4().hex[:8]
         return self.data_dir / "scratch" / session_id / turn_id
 
+    def _state_dir_for(self, conversation_id: str) -> Path:
+        # PLAN decision #16: each subprocess gets a per-conversation
+        # state root via CODEX_HOME. Without isolation, codex's session
+        # store under ~/.codex/ would mix threads across conversations.
+        return self.data_dir / "cli-state" / conversation_id / "codex"
+
     async def send(
         self,
         prompt: str,
         *,
+        conversation_id: str,
         session_id: str,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[Delta]:
         scratch = self._scratch_for(session_id)
         scratch.mkdir(parents=True, exist_ok=True)
+        state_dir = self._state_dir_for(conversation_id)
+        state_dir.mkdir(parents=True, exist_ok=True)
         if resume_session_id:
             # Resume: codex exec resume <thread_id> <prompt>. Sandbox
             # flag is rejected on resume — the original session's
@@ -178,11 +188,17 @@ class CodexAdapter:
                 prompt,
             ]
 
+        # Merge with os.environ so OAuth credentials and PATH inherit;
+        # only override the state-dir slot. Replacing env entirely would
+        # strip the user's auth and break CLI invocation.
+        child_env = {**os.environ, "CODEX_HOME": str(state_dir)}
+
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=str(scratch),
+                env=child_env,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

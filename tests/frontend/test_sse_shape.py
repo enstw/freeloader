@@ -38,6 +38,7 @@ class _ScriptedAdapter:
         self,
         prompt: str,
         *,
+        conversation_id: str,
         session_id: str,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[Delta]:

@@ -33,6 +33,7 @@ class _Adapter(Protocol):
         self,
         prompt: str,
         *,
+        conversation_id: str,
         session_id: str,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[Delta]: ...
@@ -96,6 +97,7 @@ class Router:
         turn.goto(TurnState.SPAWNING)
         adapter_gen = self.claude.send(
             prompt,
+            conversation_id=conversation_id,
             session_id=session_id,
             resume_session_id=resume,
         )

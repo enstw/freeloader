@@ -38,12 +38,14 @@ class TwoTurnFakeAdapter:
         self,
         prompt: str,
         *,
+        conversation_id: str,
         session_id: str,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[Delta]:
         self.calls.append(
             {
                 "prompt": prompt,
+                "conversation_id": conversation_id,
                 "session_id": session_id,
                 "resume_session_id": resume_session_id,
             }

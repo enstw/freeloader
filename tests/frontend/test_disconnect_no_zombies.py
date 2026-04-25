@@ -91,7 +91,9 @@ async def test_50_disconnect_cycles_terminate_every_subprocess(
 ):
     adapter = ClaudeAdapter(executable="claude", data_dir=tmp_path)
     for i in range(50):
-        gen = adapter.send(prompt="hi", session_id=f"sess-{i}")
+        gen = adapter.send(
+            prompt="hi", conversation_id=f"conv-{i}", session_id=f"sess-{i}"
+        )
         # Pull the first delta — that's the SessionIdDelta from the
         # init line. After this, the generator is suspended awaiting
         # the next stdout line, which will never come.

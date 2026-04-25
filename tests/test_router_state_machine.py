@@ -44,6 +44,7 @@ class _ScriptedAdapter:
         self,
         prompt: str,
         *,
+        conversation_id: str,
         session_id: str,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[Delta]:
@@ -168,6 +169,7 @@ class _BlockingAdapter:
         self,
         prompt: str,
         *,
+        conversation_id: str,
         session_id: str,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[Delta]:
@@ -210,7 +212,7 @@ async def test_cancellation_drives_state_to_cancelled_and_skips_binding():
 async def test_adapter_exception_drives_state_to_backend_error():
     class _BoomAdapter:
         async def send(
-            self, prompt, *, session_id, resume_session_id=None
+            self, prompt, *, conversation_id, session_id, resume_session_id=None
         ) -> AsyncIterator[Delta]:
             yield SessionIdDelta(session_id="b1")
             raise RuntimeError("kaboom")

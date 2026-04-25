@@ -52,7 +52,10 @@ def captured_spawn(monkeypatch):
 
 async def test_send_creates_scratch_and_spawns_with_add_dir(tmp_path, captured_spawn):
     adapter = ClaudeAdapter(data_dir=tmp_path)
-    deltas = [d async for d in adapter.send("hi", session_id="conv-1")]
+    deltas = [
+        d
+        async for d in adapter.send("hi", conversation_id="conv-1", session_id="conv-1")
+    ]
     assert deltas == []  # empty stream
 
     argv = captured_spawn["argv"]
@@ -86,7 +89,10 @@ async def test_resume_session_id_emits_r_flag(tmp_path, captured_spawn):
     deltas = [
         d
         async for d in adapter.send(
-            "hi", session_id="conv-2", resume_session_id="backend-42"
+            "hi",
+            conversation_id="conv-2",
+            session_id="conv-2",
+            resume_session_id="backend-42",
         )
     ]
     assert deltas == []
@@ -97,7 +103,12 @@ async def test_resume_session_id_emits_r_flag(tmp_path, captured_spawn):
 
 async def test_scratch_path_under_session_id_directory(tmp_path, captured_spawn):
     adapter = ClaudeAdapter(data_dir=tmp_path)
-    _ = [d async for d in adapter.send("hi", session_id="conv-xyz")]
+    _ = [
+        d
+        async for d in adapter.send(
+            "hi", conversation_id="conv-xyz", session_id="conv-xyz"
+        )
+    ]
     scratch = Path(captured_spawn["cwd"])
     assert scratch.parent == tmp_path / "scratch" / "conv-xyz"
 

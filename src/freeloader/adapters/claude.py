@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import uuid
 from collections.abc import AsyncIterator
@@ -189,15 +190,24 @@ class ClaudeAdapter:
         turn_id = uuid.uuid4().hex[:8]
         return self.data_dir / "scratch" / session_id / turn_id
 
+    def _state_dir_for(self, conversation_id: str) -> Path:
+        # PLAN decision #16: each subprocess gets a per-conversation
+        # state root via CLAUDE_CONFIG_DIR. Stable across turns of the
+        # same conversation, isolated across conversations.
+        return self.data_dir / "cli-state" / conversation_id / "claude"
+
     async def send(
         self,
         prompt: str,
         *,
+        conversation_id: str,
         session_id: str,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[Delta]:
         scratch = self._scratch_for(session_id)
         scratch.mkdir(parents=True, exist_ok=True)
+        state_dir = self._state_dir_for(conversation_id)
+        state_dir.mkdir(parents=True, exist_ok=True)
         argv = [
             self.executable,
             "-p",
@@ -213,11 +223,17 @@ class ClaudeAdapter:
             argv += ["-r", resume_session_id]
         argv.append(prompt)
 
+        # Merge with os.environ so OAuth credentials and PATH inherit;
+        # only override the state-dir slot. Replacing env entirely would
+        # strip the user's auth and break CLI invocation.
+        child_env = {**os.environ, "CLAUDE_CONFIG_DIR": str(state_dir)}
+
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=str(scratch),
+                env=child_env,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
