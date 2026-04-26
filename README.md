@@ -135,6 +135,29 @@ phase-1–4 evidence in hand; the rationale is in `JOURNAL.jsonl`
   flag to enable shim or passthrough for a single call. If you need
   function calling, use the underlying CLI directly.
 
+## Deploy on a dedicated host
+
+FreelOAder is intended to run on a dedicated server (an Ubuntu host or
+chroot) where the only consumer of `claude` / `codex` / `gemini` is
+FreelOAder itself. Two setup layers:
+
+1. **Adapter flags** — applied automatically per turn. The adapters spawn
+   each CLI with the closest-to-bare flag set the OAuth-coupled CLIs
+   allow. See `KNOWN-LIMITATIONS.md` for which dimensions of state are
+   killed and which remain.
+
+1. **Host setup** — a one-shot script that nullifies agent memory globally
+   for the running user:
+
+   ```bash
+   ./scripts/setup-host.sh --yes
+   ```
+
+   This symlinks `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
+   `~/.gemini/GEMINI.md` to `/dev/null` and clears `~/.codex/memories`
+   and `~/.gemini/memory`. **Do not run on a workstation** where you also
+   use these CLIs interactively; it is intended for dedicated hosts only.
+
 ## Non-goals
 
 - Public or multi-tenant deployment (ToS)

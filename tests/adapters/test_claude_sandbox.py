@@ -122,6 +122,54 @@ async def test_argv_separator_holds_when_resume_id_present(tmp_path, captured_sp
     assert argv.index("-r") < argv.index("--")
 
 
+async def test_argv_includes_minimization_flags(tmp_path, captured_spawn):
+    # Spawned claude must run with the minimal-state flag set so it doesn't
+    # inherit the user's MCP servers, slash commands, or settings. `--bare`
+    # would be ideal but disables OAuth (ANTHROPIC_API_KEY only); these
+    # flags hit the same goal without the auth strip. Memory paths
+    # (~/.claude/CLAUDE.md) are NOT killed by any flag — the deploy-time
+    # scripts/setup-host.sh symlinks them to /dev/null on dedicated hosts.
+    adapter = ClaudeAdapter(data_dir=tmp_path)
+    _ = [
+        d
+        async for d in adapter.send(
+            "hi", conversation_id="conv-min", session_id="conv-min"
+        )
+    ]
+    argv = captured_spawn["argv"]
+
+    assert "--strict-mcp-config" in argv
+    assert "--mcp-config" in argv
+    assert argv[argv.index("--mcp-config") + 1] == '{"mcpServers":{}}'
+    assert "--disable-slash-commands" in argv
+    assert "--setting-sources" in argv
+    assert argv[argv.index("--setting-sources") + 1] == ""
+
+    # The -- / prompt-at-end invariant must still hold.
+    assert argv[-2:] == ["--", "hi"]
+
+
+async def test_minimization_flags_present_on_resume(tmp_path, captured_spawn):
+    # Same flags must apply on a resume turn too — otherwise the second
+    # turn in a conversation would silently re-inherit user state.
+    adapter = ClaudeAdapter(data_dir=tmp_path)
+    _ = [
+        d
+        async for d in adapter.send(
+            "second turn",
+            conversation_id="conv-min-r",
+            session_id="conv-min-r",
+            resume_session_id="backend-77",
+        )
+    ]
+    argv = captured_spawn["argv"]
+    assert "--strict-mcp-config" in argv
+    assert "--disable-slash-commands" in argv
+    assert "--setting-sources" in argv
+    assert "-r" in argv
+    assert argv[-2:] == ["--", "second turn"]
+
+
 async def test_resume_session_id_emits_r_flag(tmp_path, captured_spawn):
     adapter = ClaudeAdapter(data_dir=tmp_path)
     deltas = [

@@ -178,6 +178,19 @@ class GeminiAdapter:
                 prompt,
                 "-o",
                 "stream-json",
+                # Minimization: gemini has no clean "skip user config" flag
+                # like codex's --ignore-user-config. We use the documented
+                # behavior that --extensions / --allowed-mcp-server-names,
+                # when supplied, restrict loading to only the named items.
+                # Passing a sentinel name no real extension or MCP server
+                # would match yields an effectively empty load. yargs may
+                # warn about an unknown extension; that's acceptable.
+                # Memory paths (~/.gemini/GEMINI.md, ~/.gemini/memory/)
+                # are handled by scripts/setup-host.sh on dedicated hosts.
+                "-e",
+                "_freeloader_none",
+                "--allowed-mcp-server-names",
+                "_freeloader_none",
             ]
             if resume_session_id:
                 argv += ["--resume", resume_session_id]

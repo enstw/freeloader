@@ -181,3 +181,57 @@ async def test_send_does_not_set_gemini_cli_home(tmp_path: Path, monkeypatch):
     assert captured["env"] is None, (
         f"GeminiAdapter must not override env; got {captured['env']!r}"
     )
+
+
+async def test_argv_includes_minimization_flags(tmp_path: Path, monkeypatch):
+    """Spawned gemini must run without inheriting the user's extensions
+    or MCP servers. Gemini has no clean "skip user config" flag like
+    codex's --ignore-user-config, so we use the documented behavior of
+    --extensions / --allowed-mcp-server-names (when supplied, restricts
+    loading to only the named items) with a sentinel name no real item
+    will match. Memory paths via ~/.gemini/GEMINI.md and ~/.gemini/memory
+    are handled by scripts/setup-host.sh on dedicated hosts.
+    """
+    captured: dict = {}
+
+    class _EmptyReader:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = _EmptyReader()
+            self.stderr = _EmptyReader()
+            self.returncode = 0
+
+        async def wait(self):
+            return 0
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    async def fake_exec(*argv, cwd=None, env=None, **kwargs):
+        captured["argv"] = list(argv)
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    adapter = GeminiAdapter(data_dir=tmp_path)
+    _ = [
+        d
+        async for d in adapter.send(
+            "hi", conversation_id="conv-min", session_id="sid-min"
+        )
+    ]
+
+    argv = captured["argv"]
+    assert "-e" in argv
+    assert argv[argv.index("-e") + 1] == "_freeloader_none"
+    assert "--allowed-mcp-server-names" in argv
+    assert argv[argv.index("--allowed-mcp-server-names") + 1] == "_freeloader_none"

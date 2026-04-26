@@ -208,6 +208,21 @@ class ClaudeAdapter:
             "--verbose",
             "--session-id",
             session_id,
+            # Minimization flags: keep the spawned claude as close to a
+            # blank assistant as the OAuth-coupled subprocess allows.
+            # `--bare` would be ideal but it strictly disables OAuth
+            # (ANTHROPIC_API_KEY only) and we need OAuth for the user's
+            # Pro/Max subscription. These flags cut MCP / slash commands /
+            # settings inheritance without touching the env. Memory paths
+            # (`~/.claude/CLAUDE.md` and friends) are NOT killed by any
+            # flag — the deploy-time `scripts/setup-host.sh` symlinks them
+            # to /dev/null on dedicated hosts.
+            "--strict-mcp-config",
+            "--mcp-config",
+            '{"mcpServers":{}}',
+            "--disable-slash-commands",
+            "--setting-sources",
+            "",
             "--add-dir",
             str(scratch),
         ]

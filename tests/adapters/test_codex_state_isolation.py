@@ -100,6 +100,53 @@ async def test_env_inherits_oauth_relevant_vars(tmp_path, captured_spawn, monkey
     assert env.get("HOME") == os.environ.get("HOME")
 
 
+async def test_argv_includes_ignore_user_config_and_rules(tmp_path, captured_spawn):
+    # Spawned codex must skip $CODEX_HOME/config.toml (so its mcp_servers,
+    # features, model_providers blocks don't load) and skip user/project
+    # execpolicy .rules files. --ignore-user-config is documented to keep
+    # auth ($CODEX_HOME) intact while skipping config.toml — exactly the
+    # invariant we want. Memory inheritance via ~/.codex/AGENTS.md is
+    # handled by scripts/setup-host.sh on dedicated hosts.
+    adapter = CodexAdapter(data_dir=tmp_path)
+    _ = [
+        d
+        async for d in adapter.send(
+            "hi", conversation_id="conv-min", session_id="sess-min"
+        )
+    ]
+    argv = captured_spawn["argv"]
+    assert "--ignore-user-config" in argv
+    assert "--ignore-rules" in argv
+
+
+async def test_minimization_flags_present_on_resume(tmp_path, monkeypatch):
+    # Same flags must apply on resume turns too. Resume argv is a separate
+    # branch in send(); without coverage there a regression could let it
+    # silently load user config on the second+ turn.
+    seen_argvs: list[list[str]] = []
+
+    async def fake_exec(*argv, cwd=None, env=None, **kwargs):
+        seen_argvs.append(list(argv))
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    adapter = CodexAdapter(data_dir=tmp_path)
+    _ = [
+        d
+        async for d in adapter.send(
+            "again",
+            conversation_id="conv-min-r",
+            session_id="thread-id-from-turn-1",
+            resume_session_id="thread-id-from-turn-1",
+        )
+    ]
+    assert len(seen_argvs) == 1
+    assert "resume" in seen_argvs[0]
+    assert "--ignore-user-config" in seen_argvs[0]
+    assert "--ignore-rules" in seen_argvs[0]
+
+
 async def test_resume_argv_shape_unchanged(tmp_path, monkeypatch):
     """Sanity: the env change does not affect the resume-vs-first-turn argv
     shape (the load-bearing invariant for codex thread continuation)."""

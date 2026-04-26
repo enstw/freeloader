@@ -156,12 +156,20 @@ class CodexAdapter:
             # Resume: codex exec resume <thread_id> <prompt>. Sandbox
             # flag is rejected on resume — the original session's
             # sandbox policy persists.
+            #
+            # Minimization flags (--ignore-user-config, --ignore-rules)
+            # are documented to keep auth ($CODEX_HOME) intact while
+            # skipping config.toml (mcp_servers, features, model_providers
+            # all skipped) and execpolicy .rules. Memory inheritance via
+            # ~/.codex/AGENTS.md is handled by scripts/setup-host.sh.
             argv = [
                 self.executable,
                 "exec",
                 "resume",
                 "--json",
                 "--skip-git-repo-check",
+                "--ignore-user-config",
+                "--ignore-rules",
                 resume_session_id,
                 prompt,
             ]
@@ -173,6 +181,8 @@ class CodexAdapter:
                 "exec",
                 "--json",
                 "--skip-git-repo-check",
+                "--ignore-user-config",
+                "--ignore-rules",
                 "-s",
                 "read-only",
                 "-C",
