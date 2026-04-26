@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Response
@@ -58,6 +60,18 @@ logger = logging.getLogger(__name__)
 TOOL_MODE_HEADER = "X-FreelOAder-Tool-Mode"
 TOOL_MODE_VALUE = "chat-only-strip"
 
+# Memory inheritance check: scripts/setup-host.sh symlinks these three files
+# to /dev/null on dedicated FreelOAder hosts. If they're not nullified at
+# startup we WARN once — operator drift is otherwise silent and shows up
+# only as a higher-than-expected token bill.
+_MEMORY_FILES: tuple[Path, ...] = (
+    Path.home() / ".claude" / "CLAUDE.md",
+    Path.home() / ".codex" / "AGENTS.md",
+    Path.home() / ".gemini" / "GEMINI.md",
+)
+# Tests / dev that don't want the warning can set this to "1".
+_SKIP_HOST_CHECKS_ENV = "FREELOADER_SKIP_HOST_CHECKS"
+
 
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -84,6 +98,8 @@ def create_app(
     router: Router | None = None,
     store: object | None = None,
 ) -> FastAPI:
+    if not os.environ.get(_SKIP_HOST_CHECKS_ENV):
+        _warn_if_memory_inheritance_active(_MEMORY_FILES)
     app = FastAPI(title="FreelOAder", version=__version__)
     r = router or Router(**load_router_config())
     s = store or default_store()
@@ -275,6 +291,38 @@ def _usage_dict(usage: UsageDelta | None) -> dict[str, int]:
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
     }
+
+
+def _warn_if_memory_inheritance_active(paths: tuple[Path, ...]) -> None:
+    """One-shot startup check: log WARNING for each memory file that isn't
+    a symlink to /dev/null. scripts/setup-host.sh nullifies these on
+    dedicated hosts; if it wasn't run, the spawned CLI subprocesses still
+    inherit the user's AGENTS.md content and burn input tokens on it.
+    Silent operator drift; warning at startup makes it visible.
+    """
+    for p in paths:
+        # Path doesn't exist at all: CLI loads nothing. Fine.
+        if not p.is_symlink() and not p.exists():
+            continue
+        if p.is_symlink():
+            try:
+                target = os.readlink(p)
+            except OSError:
+                target = "<unreadable>"
+            if target == "/dev/null":
+                continue
+            kind = f"symlink to {target!r}"
+        else:
+            kind = "regular file"
+        logger.warning(
+            "agent memory inheritance ACTIVE for %s (%s) — spawned CLI "
+            "subprocesses will load it. Run scripts/setup-host.sh --yes on "
+            "dedicated hosts to nullify, or set %s=1 to silence this warning.",
+            p,
+            kind,
+            _SKIP_HOST_CHECKS_ENV,
+            extra={"memory_path": str(p), "memory_kind": kind},
+        )
 
 
 def _warn_if_tools_dropped(req: ChatCompletionRequest, conversation_id: str) -> bool:

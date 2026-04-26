@@ -28,6 +28,12 @@ directories that are also auto-loaded. **Do not run on a workstation**
 where you also use these CLIs interactively — the symlinks are global
 to the running user.
 
+**Drift detection:** at startup, FreelOAder reads each of the three paths
+and logs a `WARNING` if any isn't a symlink to `/dev/null`. If you've
+intentionally chosen not to nullify them (e.g. running on a workstation
+during development) and don't want the warning, set
+`FREELOADER_SKIP_HOST_CHECKS=1`.
+
 ## Residuals after adapter flags + setup script
 
 Even with everything above applied, each CLI still loads:
