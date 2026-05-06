@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -19,6 +20,7 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from freeloader.adapters._subprocess import drain_stream_to_str
 from freeloader.canonical.deltas import (
     Delta,
     ErrorDelta,
@@ -249,6 +251,7 @@ class ClaudeAdapter:
         child_env = os.environ.copy()
 
         proc = None
+        stderr_task: asyncio.Task[str] | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -259,8 +262,16 @@ class ClaudeAdapter:
                 stderr=asyncio.subprocess.PIPE,
             )
             assert proc.stdout is not None
+            # Drain stderr concurrently so a verbose CLI never deadlocks
+            # on a full 64 KiB pipe buffer while we're iterating stdout.
+            # claude has no stderr-side quota signal (rate_limit_event
+            # arrives on stdout JSONL), so the captured text is
+            # discarded — the drain itself is the point.
+            stderr_task = asyncio.create_task(drain_stream_to_str(proc.stderr))
             async for delta in parse_stream(_stream_lines(proc.stdout)):
                 yield delta
+            await stderr_task
+            stderr_task = None
         finally:
             # Best-effort teardown so an aborted caller doesn't leak zombies
             # in local dev. Proper cancellation / SIGKILL-after-3s is phase 2.
@@ -271,6 +282,10 @@ class ClaudeAdapter:
                 except TimeoutError:
                     proc.kill()
                     await proc.wait()
+            if stderr_task is not None:
+                stderr_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await stderr_task
             # Per-turn scratch: remove the directory after the turn ends
             # (ROADMAP phase 1 specifies per-turn, not per-session).
             shutil.rmtree(scratch, ignore_errors=True)

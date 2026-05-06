@@ -32,6 +32,7 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from freeloader.adapters._subprocess import drain_stream_to_str
 from freeloader.canonical.deltas import (
     Delta,
     ErrorDelta,
@@ -123,18 +124,6 @@ async def parse_stream(lines: AsyncIterator[str]) -> AsyncIterator[Delta]:
 async def _stream_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:
     async for raw in stream:
         yield raw.decode("utf-8", errors="replace")
-
-
-async def _drain_stream_to_str(stream: asyncio.StreamReader | None) -> str:
-    """Step 4.2b: drain a subprocess pipe to a string in the
-    background. Started as an asyncio.Task so the CLI doesn't block
-    on a full 64 KiB stderr buffer while we're iterating its stdout."""
-    if stream is None:
-        return ""
-    chunks: list[bytes] = []
-    async for chunk in stream:
-        chunks.append(chunk)
-    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 class CodexAdapter:
@@ -232,7 +221,7 @@ class CodexAdapter:
             # (1) stop the CLI from deadlocking on a full pipe buffer
             # if it logs verbosely, (2) capture the full text so we
             # can scan for upstream 429s after the run.
-            stderr_task = asyncio.create_task(_drain_stream_to_str(proc.stderr))
+            stderr_task = asyncio.create_task(drain_stream_to_str(proc.stderr))
             async for delta in parse_stream(_stream_lines(proc.stdout)):
                 yield delta
             # Stdout EOF: the CLI is done emitting JSONL. Wait for it

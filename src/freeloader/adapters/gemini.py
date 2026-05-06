@@ -34,6 +34,7 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from freeloader.adapters._subprocess import drain_stream_to_str
 from freeloader.canonical.deltas import (
     Delta,
     ErrorDelta,
@@ -132,18 +133,6 @@ async def _stream_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:
         yield raw.decode("utf-8", errors="replace")
 
 
-async def _drain_stream_to_str(stream: asyncio.StreamReader | None) -> str:
-    """Step 4.2b: drain a subprocess pipe to a string in the
-    background. Started as an asyncio.Task so the CLI doesn't block
-    on a full 64 KiB stderr buffer while we're iterating its stdout."""
-    if stream is None:
-        return ""
-    chunks: list[bytes] = []
-    async for chunk in stream:
-        chunks.append(chunk)
-    return b"".join(chunks).decode("utf-8", errors="replace")
-
-
 class GeminiAdapter:
     """Thin wrapper over `gemini -p -o stream-json`.
 
@@ -223,7 +212,7 @@ class GeminiAdapter:
                 # Step 4.2b: same stderr discipline as codex.send —
                 # background drain prevents pipe-buffer deadlock,
                 # captured text is scanned post-exit for upstream 429.
-                stderr_task = asyncio.create_task(_drain_stream_to_str(proc.stderr))
+                stderr_task = asyncio.create_task(drain_stream_to_str(proc.stderr))
                 async for delta in parse_stream(_stream_lines(proc.stdout)):
                     yield delta
                 await proc.wait()
