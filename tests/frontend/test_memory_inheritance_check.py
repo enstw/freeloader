@@ -10,8 +10,6 @@ import logging
 import os
 from pathlib import Path
 
-import pytest
-
 from freeloader.frontend.app import _warn_if_memory_inheritance_active
 
 
@@ -85,8 +83,8 @@ def test_warning_for_symlink_to_other_target(tmp_path, caplog):
 
 def test_mixed_paths_emit_one_warning_each(tmp_path, caplog):
     paths = (
-        _make(tmp_path, "claude/CLAUDE.md", "regular"),     # warn
-        _make(tmp_path, "codex/AGENTS.md", "null_link"),    # ok
+        _make(tmp_path, "claude/CLAUDE.md", "regular"),  # warn
+        _make(tmp_path, "codex/AGENTS.md", "null_link"),  # ok
         _make(tmp_path, "gemini/GEMINI.md", "other_link"),  # warn
     )
     with caplog.at_level(logging.WARNING, logger="freeloader.frontend.app"):
