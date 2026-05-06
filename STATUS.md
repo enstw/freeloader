@@ -105,6 +105,6 @@ Next moves (post-MVP, no phase number):
   - With 4.2b shipped, the strategy now reacts to upstream 429s —
     next live-smoke run should add a 429-induction test if a
     saturated account is available.
-  - `/codex consult` or `/review` against `main` would be a sensible
-    pre-share sanity check; branch is now 49+ commits ahead of
-    origin/main (solo repo, no PR flow per memory).
+  - `/codex consult` or `/review` are pre-commit sanity checks, not
+    pre-push gates. Push to `main` directly after every commit
+    (see `AGENT.md` § "Commit discipline").

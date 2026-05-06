@@ -53,6 +53,12 @@ The non-negotiable rules:
 - `STATUS.md` must be updated in the same commit that advances a step.
 - Never commit a red gate as green. If a gate is red, commit the failing
   code with a commit that explicitly notes it, then fix forward.
+- **Push to `main` directly. No branches, no PRs.** This is a
+  solo, personal-use repo (see `PLAN.md` on ToS). When you finish a
+  commit on `main`, `git push origin main` immediately — do not
+  accumulate unpushed commits "until a sanity check." Sanity checks
+  (`/review`, `/codex consult`) happen *before* the commit, not as a
+  gate on push.
 
 ## Scope discipline
 
