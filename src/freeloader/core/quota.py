@@ -1,21 +1,16 @@
 # Canonical quota_signal event — PLAN principle #5.
 #
-# Quota is an event stream, not a counter. Each vendor delta that
-# carries quota information becomes one quota_signal record in
-# `<data_dir>/events.jsonl` (PLAN decision #6); phase 4.3's
-# quota-aware Strategy derives pressure from this stream.
+# Quota is an event stream, not a counter. Each vendor signal becomes
+# one quota_signal record in `<data_dir>/events.jsonl` (PLAN decision
+# #6); QuotaAwareStrategy derives pressure from that stream.
 #
-# Step 4.1 covers the only vendor with explicit quota telemetry —
-# claude's rate_limit_event records, observed as RateLimitDelta.
-# Step 4.2a adds a sibling builder for INFERRED signals from
-# gemini/codex (cumulative tokens per rolling window). Step 4.2b
-# adds `match_stderr_quota_pressure` (below) which detects upstream
-# 429s in codex/gemini stderr and yields a synthetic
-# `RateLimitDelta(rate_limit_type="429", status="exceeded")`; that
-# delta then flows through the existing `build_quota_signal` path
-# in router.py — no third sibling builder needed (the 4.2a comment
-# anticipating one was speculative; reusing the existing builder
-# keeps the quota_signal stream single-shape).
+# Three signal sources, one event shape:
+#   - Explicit RateLimitDelta from claude's rate_limit_event JSONL.
+#   - Inferred token-window pressure for gemini/codex
+#     (`build_quota_signal_from_usage`).
+#   - Stderr 429 scan for codex/gemini (`match_stderr_quota_pressure`,
+#     below) — yields a synthetic RateLimitDelta that goes through
+#     `build_quota_signal` like the explicit case.
 from __future__ import annotations
 
 from typing import Any
