@@ -9,6 +9,7 @@ license = { text = "Unlicense" }
 dependencies = [
     "pydantic>=2.9",
     "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.urls]

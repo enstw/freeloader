@@ -139,7 +139,7 @@ phase-1–4 evidence in hand; the rationale is in `JOURNAL.jsonl`
 
 FreelOAder is intended to run on a dedicated server (an Ubuntu host or
 chroot) where the only consumer of `claude` / `codex` / `gemini` is
-FreelOAder itself. Two setup layers:
+FreelOAder itself. Three setup layers:
 
 1. **Adapter flags** — applied automatically per turn. The adapters spawn
    each CLI with the closest-to-bare flag set the OAuth-coupled CLIs
@@ -157,6 +157,45 @@ FreelOAder itself. Two setup layers:
    `~/.gemini/GEMINI.md` to `/dev/null` and clears `~/.codex/memories`
    and `~/.gemini/memory`. **Do not run on a workstation** where you also
    use these CLIs interactively; it is intended for dedicated hosts only.
+
+1. **Run the server.** FreelOAder is a FastAPI app exposed via uvicorn.
+   `freeloader.frontend.app:create_app` is a factory (it constructs a
+   `Router` from `load_router_config()`), so the `--factory` flag is
+   required:
+
+   ```bash
+   uv sync
+   .venv/bin/uvicorn freeloader.frontend.app:create_app \
+       --factory --host 127.0.0.1 --port 8000
+   ```
+
+   Default routes: `GET /v1/models`, `POST /v1/chat/completions` (both
+   non-streaming and SSE). Bind to `127.0.0.1` only — there is no auth
+   layer, this is a personal proxy.
+
+   **No built-in process supervisor.** Wrap it in whatever your host
+   already runs: a systemd unit on a normal Linux box, `tmux-service`
+   on the `marble-server` chroot (see its `docs/05-agents.md`).
+   `lifecycle.purge_cli_state(data_dir)` exists for a future startup
+   hook but is not yet wired into the uvicorn entrypoint — restart
+   semantics today rely on the supervisor killing stragglers.
+
+   **Build-cache gotcha on chroots/SELinux hosts.** If `uv sync` fails
+   while building FreelOAder's own editable wheel with
+   `PermissionError: [Errno 13] ... os.setxattr` under
+   `~/.cache/uv/builds-v0/`, the underlying filesystem (e.g. f2fs +
+   Android `app_data_file:s0` SELinux labels) is rejecting xattr copies
+   in `shutil.copy2`. Workaround:
+
+   ```bash
+   uv sync --no-install-project
+   UV_CACHE_DIR=/tmp/uv-cache uv pip install -e .
+   ```
+
+   The first installs runtime deps; the second installs FreelOAder
+   editable using a tmpfs cache. Only the build step is on /tmp — the
+   resulting `.pth` file in `.venv/lib/.../site-packages` survives
+   reboot.
 
 ### Canonical host: `moon` (marble-server)
 
