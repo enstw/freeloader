@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -42,6 +43,7 @@ from freeloader.canonical.deltas import (
     UsageDelta,
 )
 from freeloader.config import resolve_data_dir
+from freeloader.core.quota import match_stderr_quota_pressure
 
 # Single sentinel for the "model name" axis. Codex's turn.completed
 # does not carry a model identifier; routing distinguishes provider
@@ -121,6 +123,18 @@ async def parse_stream(lines: AsyncIterator[str]) -> AsyncIterator[Delta]:
 async def _stream_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:
     async for raw in stream:
         yield raw.decode("utf-8", errors="replace")
+
+
+async def _drain_stream_to_str(stream: asyncio.StreamReader | None) -> str:
+    """Step 4.2b: drain a subprocess pipe to a string in the
+    background. Started as an asyncio.Task so the CLI doesn't block
+    on a full 64 KiB stderr buffer while we're iterating its stdout."""
+    if stream is None:
+        return ""
+    chunks: list[bytes] = []
+    async for chunk in stream:
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 class CodexAdapter:
@@ -203,6 +217,7 @@ class CodexAdapter:
         child_env = os.environ.copy()
 
         proc = None
+        stderr_task: asyncio.Task[str] | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -213,7 +228,24 @@ class CodexAdapter:
                 stderr=asyncio.subprocess.PIPE,
             )
             assert proc.stdout is not None
+            # Step 4.2b: drain stderr concurrently. Two reasons —
+            # (1) stop the CLI from deadlocking on a full pipe buffer
+            # if it logs verbosely, (2) capture the full text so we
+            # can scan for upstream 429s after the run.
+            stderr_task = asyncio.create_task(_drain_stream_to_str(proc.stderr))
             async for delta in parse_stream(_stream_lines(proc.stdout)):
+                yield delta
+            # Stdout EOF: the CLI is done emitting JSONL. Wait for it
+            # to exit so returncode is settled, then scan stderr for
+            # 429-style upstream errors and yield any pressure delta.
+            await proc.wait()
+            stderr_text = await stderr_task
+            stderr_task = None
+            for delta in match_stderr_quota_pressure(
+                provider="codex",
+                stderr_text=stderr_text,
+                exit_code=proc.returncode,
+            ):
                 yield delta
         finally:
             # Mirror claude.py teardown discipline: SIGTERM → 3s →
@@ -227,4 +259,8 @@ class CodexAdapter:
                 except TimeoutError:
                     proc.kill()
                     await proc.wait()
+            if stderr_task is not None:
+                stderr_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await stderr_task
             shutil.rmtree(scratch, ignore_errors=True)

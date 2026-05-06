@@ -8,10 +8,14 @@
 # Step 4.1 covers the only vendor with explicit quota telemetry —
 # claude's rate_limit_event records, observed as RateLimitDelta.
 # Step 4.2a adds a sibling builder for INFERRED signals from
-# gemini/codex (cumulative tokens per rolling window). Both builders
-# write to the same kind="quota_signal" slot so the strategy reads
-# one stream, not three. Step 4.2b will add a third sibling for 429
-# detection once adapters can surface it.
+# gemini/codex (cumulative tokens per rolling window). Step 4.2b
+# adds `match_stderr_quota_pressure` (below) which detects upstream
+# 429s in codex/gemini stderr and yields a synthetic
+# `RateLimitDelta(rate_limit_type="429", status="exceeded")`; that
+# delta then flows through the existing `build_quota_signal` path
+# in router.py — no third sibling builder needed (the 4.2a comment
+# anticipating one was speculative; reusing the existing builder
+# keeps the quota_signal stream single-shape).
 from __future__ import annotations
 
 from typing import Any
@@ -81,3 +85,67 @@ def build_quota_signal_from_usage(
             "tokens_threshold": tokens_threshold,
         },
     }
+
+
+# Step 4.2b: substring patterns that flag an upstream rate-limit /
+# quota-exhaustion error in CLI stderr. Case-insensitive, matched
+# per-line. Not exhaustive — vendors invent new strings — but covers
+# the HTTP-style errors we expect to surface from codex (OpenAI) and
+# gemini (Google AI). Each pattern expands the false-positive
+# surface: "rate limit" in a benign log line would emit a spurious
+# quota_signal, so we restrict matching to runs where the CLI exited
+# non-zero (a successful turn that mentions the words is not pressure).
+_QUOTA_PRESSURE_PATTERNS: tuple[str, ...] = (
+    "429",
+    "too many requests",
+    "rate limit",
+    "ratelimit",
+    "quota exceeded",
+    "quota_exceeded",
+    "resource_exhausted",
+    "resource exhausted",
+    "insufficient_quota",
+)
+
+
+def match_stderr_quota_pressure(
+    *,
+    provider: str,
+    stderr_text: str,
+    exit_code: int | None,
+) -> list[RateLimitDelta]:
+    """Step 4.2b: scan a CLI subprocess's stderr for upstream 429-style
+    errors. Returns a single `RateLimitDelta(rate_limit_type="429",
+    status="exceeded")` when any line matches a known pattern, else
+    an empty list.
+
+    Only fires when the CLI exited non-zero — a successful turn that
+    happens to log the words "rate limit" in benign output is not
+    pressure. We emit at most one delta per stderr buffer (multiple
+    matching lines are usually the same 429 reported twice; the
+    journal doesn't need duplicates and the strategy treats one as
+    enough).
+    """
+    if exit_code in (0, None):
+        return []
+    if not stderr_text:
+        return []
+    for line in stderr_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if any(p in lower for p in _QUOTA_PRESSURE_PATTERNS):
+            return [
+                RateLimitDelta(
+                    rate_limit_type="429",
+                    status="exceeded",
+                    raw={
+                        "stderr_excerpt": stripped[:500],
+                        "exit_code": exit_code,
+                        "provider": provider,
+                        "source": "stderr_scan",
+                    },
+                )
+            ]
+    return []

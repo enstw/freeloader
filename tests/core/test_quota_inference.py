@@ -6,8 +6,8 @@
 # quota_signal alongside turn_done).
 #
 # These tests scope strictly to 4.2a: token-window inference. 429
-# detection lives in step 4.2b (deferred — needs adapter stderr
-# work).
+# detection (step 4.2b) lives in test_quota_stderr_429.py and the
+# adapter-level test_{codex,gemini}_stderr_429.py.
 from __future__ import annotations
 
 import datetime as _dt

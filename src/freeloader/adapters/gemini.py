@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
 import uuid
@@ -44,6 +45,7 @@ from freeloader.canonical.deltas import (
     UsageDelta,
 )
 from freeloader.config import resolve_data_dir
+from freeloader.core.quota import match_stderr_quota_pressure
 
 
 def map_event(event: dict) -> list[Delta]:
@@ -130,6 +132,18 @@ async def _stream_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:
         yield raw.decode("utf-8", errors="replace")
 
 
+async def _drain_stream_to_str(stream: asyncio.StreamReader | None) -> str:
+    """Step 4.2b: drain a subprocess pipe to a string in the
+    background. Started as an asyncio.Task so the CLI doesn't block
+    on a full 64 KiB stderr buffer while we're iterating its stdout."""
+    if stream is None:
+        return ""
+    chunks: list[bytes] = []
+    async for chunk in stream:
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
 class GeminiAdapter:
     """Thin wrapper over `gemini -p -o stream-json`.
 
@@ -196,6 +210,7 @@ class GeminiAdapter:
                 argv += ["--resume", resume_session_id]
 
             proc = None
+            stderr_task: asyncio.Task[str] | None = None
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *argv,
@@ -205,7 +220,20 @@ class GeminiAdapter:
                     stderr=asyncio.subprocess.PIPE,
                 )
                 assert proc.stdout is not None
+                # Step 4.2b: same stderr discipline as codex.send —
+                # background drain prevents pipe-buffer deadlock,
+                # captured text is scanned post-exit for upstream 429.
+                stderr_task = asyncio.create_task(_drain_stream_to_str(proc.stderr))
                 async for delta in parse_stream(_stream_lines(proc.stdout)):
+                    yield delta
+                await proc.wait()
+                stderr_text = await stderr_task
+                stderr_task = None
+                for delta in match_stderr_quota_pressure(
+                    provider="gemini",
+                    stderr_text=stderr_text,
+                    exit_code=proc.returncode,
+                ):
                     yield delta
             finally:
                 if proc is not None and proc.returncode is None:
@@ -215,4 +243,8 @@ class GeminiAdapter:
                     except TimeoutError:
                         proc.kill()
                         await proc.wait()
+                if stderr_task is not None:
+                    stderr_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await stderr_task
                 shutil.rmtree(scratch, ignore_errors=True)

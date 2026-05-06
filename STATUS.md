@@ -1,7 +1,45 @@
-# FreelOAder status — 2026-04-25
+# FreelOAder status — 2026-05-07
 
 ## Phase: 5/5 — tool-call decision  ✅ GATE GREEN
 ## MVP: complete — all 5 phases shipped
+## Backlog: 4.2b ✅ shipped
+
+Step 4.2b shipped:
+  - `core/quota.py::match_stderr_quota_pressure(provider,
+    stderr_text, exit_code)` is the single matcher. Returns
+    `[RateLimitDelta(rate_limit_type="429", status="exceeded",
+    raw={stderr_excerpt, exit_code, provider, source})]` on a
+    pattern hit, else `[]`. Gates on `exit_code != 0` so a clean
+    turn that mentions "rate limit" in telemetry is not flagged.
+  - Patterns (case-insensitive substring per line): `"429"`,
+    `"too many requests"`, `"rate limit"`, `"ratelimit"`,
+    `"quota exceeded"`, `"quota_exceeded"`, `"resource_exhausted"`,
+    `"resource exhausted"`, `"insufficient_quota"`.
+  - `CodexAdapter.send` and `GeminiAdapter.send` drain stderr in
+    a background `asyncio.Task` (no pipe-buffer deadlock) and
+    yield matcher output before returning. The adapter's `finally`
+    cancels and awaits the task on cancellation.
+  - The yielded `RateLimitDelta` flows through the existing router
+    path (`router.py:265`) — `build_quota_signal` is reused, no
+    third sibling builder needed; the 4.2a-era comment
+    anticipating one was speculative and was removed.
+  - Tests added (+24, total 279):
+      • 13 in `tests/core/test_quota_stderr_429.py` (matcher unit).
+      • 4 in `tests/adapters/test_codex_stderr_429.py` (subprocess
+        fake yields stderr; assert delta).
+      • 3 in `tests/adapters/test_gemini_stderr_429.py` (RESOURCE_-
+        EXHAUSTED, clean run, HTTP 429 phrasings).
+      • 4 in `tests/core/test_quota_stderr_429_router.py` (router
+        writes quota_signal, strategy observes, terminal flips to
+        rate_limited).
+  - Gate 4 green; gate 5 green; ruff/format clean.
+
+Did NOT do (still deferred):
+  - claude stderr drain — claude has rate_limit_event in JSONL so
+    the 4.2b path doesn't apply; recorded as a low-severity lesson
+    (`subject:stderr_pipe_buffer_drain`).
+  - Live-smoke 429 induction (would need a saturated subscription).
+  - Per-vendor exhaustive pattern catalogue.
 
 Phase 5 outcome:
   Hard problem #1 (tool-call translation) decided. Strategy:
@@ -41,8 +79,6 @@ MVP-complete state:
 What MVP does NOT include (PLAN.md "Things to explicitly *not* do"
 plus phase deferrals):
   - Tool-call shim / passthrough — rejected in phase 5
-  - 4.2b gemini/codex 429 stderr detection — additive; consumed
-    transparently by 4.3 + 4.5 if/when added
   - Per-provider threshold overrides in `freeloader.toml`
   - Strategy weights — `QuotaAwareStrategy` is cursor-rotating
   - Runtime config reload
@@ -66,8 +102,9 @@ Next moves (post-MVP, no phase number):
     for tool-mode came from build-time observation; live operation
     would surface failure modes (CLI prompt drift, cold-cache
     surprises, real quota burn) that build-time can't.
-  - 4.2b is the smallest concrete additive backlog item if/when 429s
-    show up in the wild.
+  - With 4.2b shipped, the strategy now reacts to upstream 429s —
+    next live-smoke run should add a 429-induction test if a
+    saturated account is available.
   - `/codex consult` or `/review` against `main` would be a sensible
-    pre-share sanity check; branch is now 43+ commits ahead of
+    pre-share sanity check; branch is now 49+ commits ahead of
     origin/main (solo repo, no PR flow per memory).
