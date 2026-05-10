@@ -207,6 +207,10 @@ the same host. Networking, paths, supervision, and service config
 should be planned with that destination in mind, not just laptop-local
 use. Public deployment is still ruled out by the ToS constraint above.
 
+For the live topology — boot path, on-host paths, log locations,
+operate cheatsheet, update procedure — see
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
 ## Non-goals
 
 - Public or multi-tenant deployment (ToS)
