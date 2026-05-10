@@ -158,6 +158,16 @@ FreelOAder itself. Two setup layers:
    and `~/.gemini/memory`. **Do not run on a workstation** where you also
    use these CLIs interactively; it is intended for dedicated hosts only.
 
+### Canonical host: `moon` (marble-server)
+
+The author runs FreelOAder on `moon`, an Ubuntu host provisioned and
+fronted by the [`marble-server`](https://github.com/enstw/marble-server)
+project (sibling repo at `~/workspace/marble-server`). Hermes — the
+agent that consumes FreelOAder's OpenAI-compatible endpoint — runs on
+the same host. Networking, paths, supervision, and service config
+should be planned with that destination in mind, not just laptop-local
+use. Public deployment is still ruled out by the ToS constraint above.
+
 ## Non-goals
 
 - Public or multi-tenant deployment (ToS)
